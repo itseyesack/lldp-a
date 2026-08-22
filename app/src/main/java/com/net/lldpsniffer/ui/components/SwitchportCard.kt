@@ -25,6 +25,7 @@ import com.net.lldpsniffer.model.CopyFieldsConfig
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.ProtocolType
 import com.net.lldpsniffer.model.toDisplayText
+import com.net.lldpsniffer.usb.PeerDevice
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,6 +35,7 @@ fun SwitchportCard(
     info: MergedSwitchportRecord?,
     linkUp: Boolean? = true,
     recordFinalized: Boolean = false,
+    soloHostPeer: PeerDevice? = null,
     copyFieldsConfig: CopyFieldsConfig = CopyFieldsConfig(),
     onRenameClick: () -> Unit = {},
     onEndRecordClick: () -> Unit = {}
@@ -117,6 +119,34 @@ fun SwitchportCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline
                     )
+                }
+            } else if (info == null && soloHostPeer != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.SwapHoriz,
+                            contentDescription = "Connected to host",
+                            tint = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Connected directly to a host device",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "No switch found - ${soloHostPeer.mac}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
                 }
             } else if (info == null) {
                 Box(

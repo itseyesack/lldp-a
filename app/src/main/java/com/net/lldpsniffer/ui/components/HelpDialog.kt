@@ -1,5 +1,6 @@
 package com.net.lldpsniffer.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -7,12 +8,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 
+private const val GITHUB_REPO_URL = "https://github.com/itseyesack/lldp-a"
+
 @Composable
 fun HelpDialog(onDismiss: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(16.dp),
@@ -32,6 +37,12 @@ fun HelpDialog(onDismiss: () -> Unit) {
                     text = "lldp-a Info & Setup",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "View source on GitHub",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { uriHandler.openUri(GITHUB_REPO_URL) }
                 )
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))

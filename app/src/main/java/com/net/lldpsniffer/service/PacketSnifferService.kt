@@ -15,8 +15,11 @@ import androidx.core.app.NotificationCompat
 import com.net.lldpsniffer.MainActivity
 import com.net.lldpsniffer.R
 import com.net.lldpsniffer.model.CapturedPacket
+import com.net.lldpsniffer.usb.AdapterInfo
+import com.net.lldpsniffer.usb.PeerDevice
 import com.net.lldpsniffer.usb.UsbConnectionManager
 import com.net.lldpsniffer.usb.UsbConnectionState
+import com.net.lldpsniffer.usb.driver.LinkStatus
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -72,6 +75,15 @@ class PacketSnifferService : Service() {
 
     val linkState: StateFlow<Boolean?>
         get() = usbConnectionManager.linkState
+
+    val linkStatus: StateFlow<LinkStatus?>
+        get() = usbConnectionManager.linkStatus
+
+    val adapterInfo: StateFlow<AdapterInfo?>
+        get() = usbConnectionManager.adapterInfo
+
+    val peerDevices: StateFlow<List<PeerDevice>>
+        get() = usbConnectionManager.peerDevices
 
     override fun onCreate() {
         super.onCreate()

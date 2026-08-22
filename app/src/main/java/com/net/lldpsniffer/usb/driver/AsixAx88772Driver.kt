@@ -79,9 +79,22 @@ class AsixAx88772Driver : VendorAdapterDriver {
 
         private const val MII_BMSR = 0x01
         private const val BMSR_LSTATUS = 0x0004
+
+        // Standard MII autonegotiation advertisement/link-partner-ability registers, used
+        // to derive negotiated speed/duplex (this chip has no dedicated speed-status
+        // register the way AX88179/RTL8153 do - it's the classic generic-MII approach).
+        private const val MII_ANAR = 0x04
+        private const val MII_ANLPAR = 0x05
+        private const val ANAR_10_HALF = 0x0020
+        private const val ANAR_10_FULL = 0x0040
+        private const val ANAR_100_HALF = 0x0080
+        private const val ANAR_100_FULL = 0x0100
     }
 
     override val name = "ASIX AX88772/AX88772A/AX88772B"
+
+    // 10/100 Fast Ethernet only - this chip family has no Gigabit PHY.
+    override val maxLinkMbps = 100
 
     override fun matches(device: UsbDevice): Boolean {
         return (device.vendorId == ASIX_VID && device.productId == AX88772_PID) ||
@@ -244,5 +257,32 @@ class AsixAx88772Driver : VendorAdapterDriver {
         val linkUp = (bmsr and BMSR_LSTATUS) != 0
         logDiag("AX88772 MII BMSR: 0x${String.format("%04X", bmsr)} (Link up: $linkUp)")
         return linkUp
+    }
+
+    /**
+     * Derives negotiated speed/duplex from the common bits of ANAR (what we advertised) and
+     * ANLPAR (what the link partner advertised back), picking the highest-priority mode both
+     * sides support - the standard generic-MII resolution algorithm.
+     */
+    override fun readLinkStatus(connection: UsbDeviceConnection, logDiag: (String) -> Unit): LinkStatus? {
+        val phyId = embeddedPhyId(connection, logDiag)
+        mdioRead(connection, logDiag, phyId, MII_BMSR)
+        val bmsr = mdioRead(connection, logDiag, phyId, MII_BMSR) ?: return null
+        val linkUp = (bmsr and BMSR_LSTATUS) != 0
+        if (!linkUp) return LinkStatus(up = false)
+
+        val anar = mdioRead(connection, logDiag, phyId, MII_ANAR) ?: 0
+        val anlpar = mdioRead(connection, logDiag, phyId, MII_ANLPAR) ?: 0
+        val common = anar and anlpar
+
+        val (speedMbps, duplex) = when {
+            common and ANAR_100_FULL != 0 -> 100 to "Full"
+            common and ANAR_100_HALF != 0 -> 100 to "Half"
+            common and ANAR_10_FULL != 0 -> 10 to "Full"
+            common and ANAR_10_HALF != 0 -> 10 to "Half"
+            else -> null to null
+        }
+        logDiag("AX88772 ANAR/ANLPAR: 0x${String.format("%04X", anar)}/0x${String.format("%04X", anlpar)} (${speedMbps ?: "unknown"}Mbps, ${duplex ?: "unknown"}-duplex)")
+        return LinkStatus(up = true, speedMbps = speedMbps, duplex = duplex)
     }
 }

@@ -48,6 +48,11 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
 
     override val name = "Realtek RTL8153/8152/8156"
 
+    // RTL8153/8156 are Gigabit-capable; the older RTL8152 in this same family is 10/100
+    // only, but the driver has no way to disambiguate PID from this static property, so
+    // this reports the family's ceiling rather than a per-chip exact figure.
+    override val maxLinkMbps = 1000
+
     override fun matches(device: UsbDevice): Boolean {
         return device.vendorId == REALTEK_VID &&
             device.productId in setOf(RTL8153_PID, RTL8152_PID, RTL8156_PID)
@@ -117,18 +122,18 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         return if (linkRead > 0) linkBuf[0].toInt() and 0xFF else null
     }
 
-    /** Decodes a PLA_PHYSTATUS byte and logs it. Returns the link-up bit. */
-    private fun decodeAndLogLinkStatus(linkByte: Int, logDiag: (String) -> Unit): Boolean {
+    /** Decodes a PLA_PHYSTATUS byte and logs it. */
+    private fun decodeAndLogLinkStatus(linkByte: Int, logDiag: (String) -> Unit): LinkStatus {
         val linkUp = (linkByte and PLA_PHYSTATUS_LINK_STATUS) != 0
-        val speedDesc = when {
-            linkByte and PLA_PHYSTATUS_1000BPS != 0 -> "1000Mbps"
-            linkByte and PLA_PHYSTATUS_100BPS != 0 -> "100Mbps"
-            linkByte and PLA_PHYSTATUS_10BPS != 0 -> "10Mbps"
-            else -> "unknown speed"
+        val speedMbps = when {
+            linkByte and PLA_PHYSTATUS_1000BPS != 0 -> 1000
+            linkByte and PLA_PHYSTATUS_100BPS != 0 -> 100
+            linkByte and PLA_PHYSTATUS_10BPS != 0 -> 10
+            else -> null
         }
-        val dupDesc = if (linkByte and PLA_PHYSTATUS_FULL_DUP != 0) "full-duplex" else "half-duplex"
-        logDiag("RTL8153 PHY Link Status (0xE908): 0x${String.format("%02X", linkByte)} (Link up: $linkUp, $speedDesc, $dupDesc)")
-        return linkUp
+        val duplex = if (linkByte and PLA_PHYSTATUS_FULL_DUP != 0) "Full" else "Half"
+        logDiag("RTL8153 PHY Link Status (0xE908): 0x${String.format("%02X", linkByte)} (Link up: $linkUp, ${speedMbps ?: "unknown"}Mbps, $duplex-duplex)")
+        return LinkStatus(up = linkUp, speedMbps = speedMbps, duplex = duplex)
     }
 
     /**
@@ -232,7 +237,7 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
             Thread.sleep(100)
         }
         if (linkByte != null) {
-            val linkUp = decodeAndLogLinkStatus(linkByte, logDiag)
+            val linkUp = decodeAndLogLinkStatus(linkByte, logDiag).up
             if (linkUp) {
                 // Link may have come up seconds after the FMC/CR sequence above already ran
                 // while link was still down - re-kick now that it's confirmed up.
@@ -272,6 +277,11 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
     }
 
     override fun pollLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean? {
+        val phyByte = readPlaPhyStatus(connection) ?: return null
+        return decodeAndLogLinkStatus(phyByte, logDiag).up
+    }
+
+    override fun readLinkStatus(connection: UsbDeviceConnection, logDiag: (String) -> Unit): LinkStatus? {
         val phyByte = readPlaPhyStatus(connection) ?: return null
         return decodeAndLogLinkStatus(phyByte, logDiag)
     }

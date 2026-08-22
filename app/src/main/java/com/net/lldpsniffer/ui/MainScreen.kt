@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -23,7 +24,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.net.lldpsniffer.ui.components.*
+import com.net.lldpsniffer.usb.AdapterInfo
 import com.net.lldpsniffer.usb.UsbConnectionState
+import com.net.lldpsniffer.usb.driver.LinkStatus
 import com.net.lldpsniffer.viewmodel.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,8 +40,12 @@ fun MainScreen(
     val context = LocalContext.current
     val connectionState by viewModel.connectionState.collectAsState()
     val linkState by viewModel.linkState.collectAsState()
+    val linkStatus by viewModel.linkStatus.collectAsState()
+    val adapterInfo by viewModel.adapterInfo.collectAsState()
+    val peerDevices by viewModel.peerDevices.collectAsState()
     val currentRecord by viewModel.currentRecord.collectAsState()
     val currentRecordFinalized by viewModel.currentRecordFinalized.collectAsState()
+    val soloHostPeer by viewModel.soloHostPeer.collectAsState()
     val history by viewModel.history.collectAsState()
     val filteredPackets by viewModel.filteredPackets.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
@@ -51,6 +58,7 @@ fun MainScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<com.net.lldpsniffer.model.MergedSwitchportRecord?>(null) }
     var detailTarget by remember { mutableStateOf<com.net.lldpsniffer.model.MergedSwitchportRecord?>(null) }
+    var showAdapterInfoDialog by remember { mutableStateOf(false) }
 
     fun shareJsonUri(uri: android.net.Uri?, title: String) {
         if (uri == null) return
@@ -109,9 +117,12 @@ fun MainScreen(
             ConnectionStatusBanner(
                 state = connectionState,
                 linkUp = linkState,
+                linkStatus = linkStatus,
+                adapterInfo = adapterInfo,
                 onRequestPermission = onRequestPermission,
                 onStartCapture = onStartCapture,
-                onStopCapture = onStopCapture
+                onStopCapture = onStopCapture,
+                onShowAdapterInfo = { showAdapterInfoDialog = true }
             )
 
             // Switchport Card (live merged LLDP/CDP record for the current session)
@@ -119,6 +130,7 @@ fun MainScreen(
                 info = currentRecord,
                 linkUp = linkState,
                 recordFinalized = currentRecordFinalized,
+                soloHostPeer = soloHostPeer,
                 copyFieldsConfig = copyFieldsConfig,
                 onRenameClick = { currentRecord?.let { renameTarget = it } },
                 onEndRecordClick = { viewModel.endCurrentRecordManually() }
@@ -134,6 +146,9 @@ fun MainScreen(
                 onRecordClick = { record -> detailTarget = record },
                 copyFieldsConfig = copyFieldsConfig
             )
+
+            // Passively-observed directly-connected peers (any Ethernet traffic, not just LLDP/CDP)
+            PeerDevicesCard(peers = peerDevices)
 
             if (showLogViews) {
                 // Live Hardware Log Console
@@ -171,6 +186,16 @@ fun MainScreen(
             packet = packet,
             onDismiss = { viewModel.selectPacket(null) }
         )
+    }
+
+    if (showAdapterInfoDialog) {
+        adapterInfo?.let { info ->
+            AdapterInfoDialog(
+                adapterInfo = info,
+                linkStatus = linkStatus,
+                onDismiss = { showAdapterInfoDialog = false }
+            )
+        }
     }
 
     detailTarget?.let { record ->
@@ -212,9 +237,12 @@ fun MainScreen(
 fun ConnectionStatusBanner(
     state: UsbConnectionState,
     linkUp: Boolean?,
+    linkStatus: LinkStatus?,
+    adapterInfo: AdapterInfo?,
     onRequestPermission: () -> Unit,
     onStartCapture: () -> Unit,
-    onStopCapture: () -> Unit
+    onStopCapture: () -> Unit,
+    onShowAdapterInfo: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -240,10 +268,17 @@ fun ConnectionStatusBanner(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val statusColor = when (state) {
-                    is UsbConnectionState.Connected -> Color(0xFF4CAF50)
+                    is UsbConnectionState.Disconnected -> Color.Gray
                     is UsbConnectionState.Error -> Color(0xFFF44336)
+                    is UsbConnectionState.PermissionDenied -> Color(0xFFF44336)
                     is UsbConnectionState.Connecting -> Color(0xFFFFC107)
-                    else -> Color.Gray
+                    is UsbConnectionState.DeviceDetected -> Color(0xFFFFC107)
+                    is UsbConnectionState.PermissionRequested -> Color(0xFFFFC107)
+                    is UsbConnectionState.Connected -> when (linkUp) {
+                        true -> Color(0xFF4CAF50)
+                        false -> Color(0xFFFF9800)
+                        null -> Color(0xFFFFC107)
+                    }
                 }
 
                 Box(
@@ -256,13 +291,13 @@ fun ConnectionStatusBanner(
 
                 Column {
                     val titleText = when (state) {
-                        is UsbConnectionState.Connected -> "CDC-ECM Config 2 Active"
-                        is UsbConnectionState.Connecting -> "Connecting USB Adapter..."
-                        is UsbConnectionState.DeviceDetected -> "USB Ethernet Adapter Attached"
-                        is UsbConnectionState.PermissionRequested -> "Awaiting USB Permission"
-                        is UsbConnectionState.PermissionDenied -> "USB Permission Denied"
-                        is UsbConnectionState.Error -> "USB Error / Contention"
-                        is UsbConnectionState.Disconnected -> "No USB Adapter Connected"
+                        is UsbConnectionState.Connected -> "Adapter Connected"
+                        is UsbConnectionState.Connecting -> "Connecting..."
+                        is UsbConnectionState.DeviceDetected -> "Adapter Detected"
+                        is UsbConnectionState.PermissionRequested -> "Permission Needed"
+                        is UsbConnectionState.PermissionDenied -> "Permission Denied"
+                        is UsbConnectionState.Error -> "Connection Error"
+                        is UsbConnectionState.Disconnected -> "No Adapter Connected"
                     }
 
                     Text(
@@ -273,11 +308,17 @@ fun ConnectionStatusBanner(
                     )
 
                     val subText = when (state) {
-                        is UsbConnectionState.Connected -> "${state.deviceName} (EP 0x${String.format("%02X", state.bulkInEndpoint)})"
+                        is UsbConnectionState.Connected -> when (linkUp) {
+                            true -> linkStatus?.speedMbps?.let { "Link: Up - $it Mbps" } ?: "Link: Up"
+                            false -> "Link: Down"
+                            null -> "Link: Unknown"
+                        }
                         is UsbConnectionState.Connecting -> state.stepDescription
-                        is UsbConnectionState.DeviceDetected -> "${state.deviceName} (VID 0x${String.format("%04X", state.vendorId)} / PID 0x${String.format("%04X", state.productId)})"
+                        is UsbConnectionState.DeviceDetected -> "Ready to scan"
+                        is UsbConnectionState.PermissionRequested -> "Allow access to use this adapter"
+                        is UsbConnectionState.PermissionDenied -> "Unplug and reconnect the adapter to try again"
                         is UsbConnectionState.Error -> state.message
-                        else -> "Plug in a USB-C Ethernet Adapter (e.g. Realtek RTL8153)"
+                        is UsbConnectionState.Disconnected -> "Plug in a USB-C Ethernet adapter"
                     }
 
                     Text(
@@ -286,32 +327,6 @@ fun ConnectionStatusBanner(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2
                     )
-
-                    if (state is UsbConnectionState.Connected) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            val linkColor = when (linkUp) {
-                                true -> Color(0xFF4CAF50)
-                                false -> Color(0xFFF44336)
-                                null -> Color.Gray
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .background(color = linkColor, shape = CircleShape)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = when (linkUp) {
-                                    true -> "PHY Link: Up"
-                                    false -> "PHY Link: Down"
-                                    null -> "PHY Link: Unknown"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
                 }
             }
 
@@ -319,6 +334,14 @@ fun ConnectionStatusBanner(
 
             when (state) {
                 is UsbConnectionState.Connected -> {
+                    if (adapterInfo != null) {
+                        IconButton(onClick = onShowAdapterInfo) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = "Adapter Info"
+                            )
+                        }
+                    }
                     IconButton(onClick = onStopCapture) {
                         Icon(
                             imageVector = Icons.Default.Stop,

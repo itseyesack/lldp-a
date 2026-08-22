@@ -81,6 +81,8 @@ class AsixAx88179Driver : VendorAdapterDriver {
 
     override val name = "ASIX AX88179/AX88178A"
 
+    override val maxLinkMbps = 1000
+
     override fun matches(device: UsbDevice): Boolean {
         return device.vendorId == ASIX_VID &&
             device.productId in setOf(AX88179_PID, AX88178A_PID)
@@ -204,17 +206,26 @@ class AsixAx88179Driver : VendorAdapterDriver {
         }
     }
 
+    private fun decodeAndLogLinkStatus(physr: Int, logDiag: (String) -> Unit): LinkStatus {
+        val linkUp = (physr and GMII_PHY_PHYSR_LINK) != 0
+        val speedMbps = when {
+            physr and GMII_PHY_PHYSR_GIGA != 0 -> 1000
+            physr and GMII_PHY_PHYSR_100 != 0 -> 100
+            linkUp -> 10
+            else -> null
+        }
+        val duplex = if (physr and GMII_PHY_PHYSR_FULL != 0) "Full" else "Half"
+        logDiag("AX88179 GMII_PHY_PHYSR: 0x${String.format("%04X", physr)} (Link up: $linkUp, ${speedMbps ?: "unknown"}Mbps, $duplex-duplex)")
+        return LinkStatus(up = linkUp, speedMbps = speedMbps, duplex = duplex)
+    }
+
     override fun pollLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean? {
         val physr = readPhy(connection, logDiag, GMII_PHY_PHYSR) ?: return null
-        val linkUp = (physr and GMII_PHY_PHYSR_LINK) != 0
-        val speedDesc = when {
-            physr and GMII_PHY_PHYSR_GIGA != 0 -> "1000Mbps"
-            physr and GMII_PHY_PHYSR_100 != 0 -> "100Mbps"
-            linkUp -> "10Mbps"
-            else -> "unknown speed"
-        }
-        val dupDesc = if (physr and GMII_PHY_PHYSR_FULL != 0) "full-duplex" else "half-duplex"
-        logDiag("AX88179 GMII_PHY_PHYSR: 0x${String.format("%04X", physr)} (Link up: $linkUp, $speedDesc, $dupDesc)")
-        return linkUp
+        return decodeAndLogLinkStatus(physr, logDiag).up
+    }
+
+    override fun readLinkStatus(connection: UsbDeviceConnection, logDiag: (String) -> Unit): LinkStatus? {
+        val physr = readPhy(connection, logDiag, GMII_PHY_PHYSR) ?: return null
+        return decodeAndLogLinkStatus(physr, logDiag)
     }
 }

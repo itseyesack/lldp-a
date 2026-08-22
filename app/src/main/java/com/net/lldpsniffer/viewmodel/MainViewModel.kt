@@ -16,7 +16,10 @@ import com.net.lldpsniffer.model.isComplete
 import com.net.lldpsniffer.model.mergeWithPacket
 import com.net.lldpsniffer.model.toJson
 import com.net.lldpsniffer.service.PacketSnifferService
+import com.net.lldpsniffer.usb.AdapterInfo
+import com.net.lldpsniffer.usb.PeerDevice
 import com.net.lldpsniffer.usb.UsbConnectionState
+import com.net.lldpsniffer.usb.driver.LinkStatus
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -55,6 +58,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         service?.linkState ?: flowOf(null)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    val linkStatus: StateFlow<LinkStatus?> = _service.flatMapLatest { service ->
+        service?.linkStatus ?: flowOf(null)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val adapterInfo: StateFlow<AdapterInfo?> = _service.flatMapLatest { service ->
+        service?.adapterInfo ?: flowOf(null)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val peerDevices: StateFlow<List<PeerDevice>> = _service.flatMapLatest { service ->
+        service?.peerDevices ?: flowOf(emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _packetList = MutableStateFlow<List<CapturedPacket>>(emptyList())
     val packetList: StateFlow<List<CapturedPacket>> = _packetList.asStateFlow()
 
@@ -87,9 +102,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _showLogViews = MutableStateFlow(settingsStore.loadShowLogViews())
     val showLogViews: StateFlow<Boolean> = _showLogViews.asStateFlow()
 
+    private val _soloHostPeer = MutableStateFlow<PeerDevice?>(null)
+    val soloHostPeer: StateFlow<PeerDevice?> = _soloHostPeer.asStateFlow()
+
     private var currentSessionId: String? = null
     private var sessionFinalizedThisSession = false
     private var linkDownDebounceJob: Job? = null
+    private var soloHostCheckJob: Job? = null
 
     private var packetCollectionJob: Job? = null
     private var linkStateCollectionJob: Job? = null
@@ -139,6 +158,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sessionFinalizedThisSession = false
                 _currentRecord.value = null
                 _currentRecordFinalized.value = false
+                _soloHostPeer.value = null
+                soloHostCheckJob?.cancel()
+                // If a full minute passes with no LLDP/CDP frame but exactly one other host is
+                // seen on the link, this is very likely a direct connection to an end device
+                // (laptop, phone) rather than a switch, which would normally emit frames within
+                // 30-60s - so show "connected to a host" instead of an indefinite spinner.
+                soloHostCheckJob = viewModelScope.launch {
+                    delay(60_000)
+                    if (_currentRecord.value == null) {
+                        peerDevices.value.singleOrNull()?.let { _soloHostPeer.value = it }
+                    }
+                }
             }
         } else {
             if (currentSessionId != null && linkDownDebounceJob == null) {
@@ -157,6 +188,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val base = _currentRecord.value ?: MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
         val merged = base.mergeWithPacket(packet)
         _currentRecord.value = merged
+        soloHostCheckJob?.cancel()
+        _soloHostPeer.value = null
+
+        // Dumps the post-merge record so a bad field can be traced from the exported log
+        // alone - the USB-C port is occupied by the adapter during capture, so live adb
+        // inspection of app state isn't an option while a session is running.
+        _service.value?.usbConnectionManager?.logDiag(
+            "Merged record: switchName=${merged.switchName}, portId=${merged.portId}, " +
+                "chassisId=${merged.chassisId}, vlanId=${merged.vlanId}, managementIp=${merged.managementIp}, " +
+                "duplex=${merged.duplex}, platform=${merged.platform}, softwareVersion=${merged.softwareVersion}, " +
+                "capabilities=${merged.capabilities}, portDescription=${merged.portDescription}"
+        )
 
         if (!sessionFinalizedThisSession && merged.isComplete()) {
             pushToHistory(merged)
@@ -181,8 +224,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         currentSessionId = null
         sessionFinalizedThisSession = false
         linkDownDebounceJob = null
+        soloHostCheckJob?.cancel()
+        soloHostCheckJob = null
         _currentRecord.value = null
         _currentRecordFinalized.value = false
+        _soloHostPeer.value = null
     }
 
     fun endCurrentRecordManually() {

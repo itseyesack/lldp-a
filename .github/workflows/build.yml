@@ -51,23 +51,32 @@ jobs:
           name: lldp-a-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Rename Release APK
+        id: rename_apk
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          RENAMED_PATH="app/build/outputs/apk/release/lldp-a-$SHORT_SHA.apk"
+          echo "apk_path=$RENAMED_PATH" >> "$GITHUB_OUTPUT"
+          cp app/build/outputs/apk/release/app-release.apk "$RENAMED_PATH"
+
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: lldp-a-release
-          path: app/build/outputs/apk/release/app-release.apk
+          path: ${{ steps.rename_apk.outputs.apk_path }}
 
       - name: Create GitHub Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/app-release.apk
+          files: ${{ steps.rename_apk.outputs.apk_path }}
           tag_name: release-${{ github.sha }}
-          name: LLDP-A (${{ github.sha }})
+          name: LLDP-A (${{ steps.rename_apk.outputs.short_sha }})
           body: |
             Automated release for commit `${{ github.sha }}`.
 
             - **App**: LLDP-A (Android LLDP/CDP Sniffer)
-            - **Binary**: `app-release.apk`
+            - **Binary**: `lldp-a-${{ steps.rename_apk.outputs.short_sha }}.apk`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

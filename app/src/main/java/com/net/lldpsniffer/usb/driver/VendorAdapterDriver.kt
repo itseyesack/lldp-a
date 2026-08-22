@@ -10,8 +10,18 @@ import android.hardware.usb.UsbDeviceConnection
  * adapter model is added by writing one new implementation and registering it, without
  * touching the capture/ingestion pipeline.
  */
+/** Live link details beyond up/down, for display in an adapter/link info panel. */
+data class LinkStatus(
+    val up: Boolean,
+    val speedMbps: Int? = null,
+    val duplex: String? = null
+)
+
 interface VendorAdapterDriver {
     val name: String
+
+    /** Highest link speed this chipset family can negotiate, for an adapter info panel. */
+    val maxLinkMbps: Int
 
     /** True if this driver knows how to bring up the given device (matched by VID/PID). */
     fun matches(device: UsbDevice): Boolean
@@ -31,4 +41,12 @@ interface VendorAdapterDriver {
      * Returns null if the read failed (state unknown), true/false for up/down otherwise.
      */
     fun pollLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean?
+
+    /**
+     * Polls current link state plus negotiated speed/duplex where the chipset exposes it.
+     * Default implementation falls back to [pollLinkUp] with no speed/duplex detail.
+     */
+    fun readLinkStatus(connection: UsbDeviceConnection, logDiag: (String) -> Unit): LinkStatus? {
+        return pollLinkUp(connection, logDiag)?.let { LinkStatus(up = it) }
+    }
 }

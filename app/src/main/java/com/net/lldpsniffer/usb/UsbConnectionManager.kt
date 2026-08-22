@@ -8,6 +8,7 @@ import com.net.lldpsniffer.model.CapturedPacket
 import com.net.lldpsniffer.parser.PacketParser
 import com.net.lldpsniffer.usb.driver.AsixAx88179Driver
 import com.net.lldpsniffer.usb.driver.AsixAx88772Driver
+import com.net.lldpsniffer.usb.driver.LinkStatus
 import com.net.lldpsniffer.usb.driver.RealtekRtl8153Driver
 import com.net.lldpsniffer.usb.driver.VendorAdapterDriver
 import kotlinx.coroutines.*
@@ -22,6 +23,26 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/** Static identity of the connected adapter, for an info panel - not live register state. */
+data class AdapterInfo(
+    val deviceName: String,
+    val vendorId: Int,
+    val productId: Int,
+    val driverName: String?,
+    val maxLinkMbps: Int?,
+    val supported: Boolean
+)
+
+/** A directly-connected host observed passively via any Ethernet frame it sent, not just LLDP/CDP. */
+data class PeerDevice(
+    val mac: String,
+    val ip: String?,
+    val protocolLabel: String,
+    val firstSeen: Long,
+    val lastSeen: Long,
+    val frameCount: Int
+)
 
 sealed class UsbConnectionState {
     object Disconnected : UsbConnectionState()
@@ -76,6 +97,20 @@ class UsbConnectionManager(private val context: Context) {
     // (re)negotiation can complete seconds after the cable is plugged in.
     private val _linkState = MutableStateFlow<Boolean?>(null)
     val linkState: StateFlow<Boolean?> = _linkState.asStateFlow()
+
+    // Speed/duplex detail alongside the plain up/down _linkState above - populated by the
+    // same poll, kept separate so existing _linkState consumers are unaffected.
+    private val _linkStatus = MutableStateFlow<LinkStatus?>(null)
+    val linkStatus: StateFlow<LinkStatus?> = _linkStatus.asStateFlow()
+
+    private val _adapterInfo = MutableStateFlow<AdapterInfo?>(null)
+    val adapterInfo: StateFlow<AdapterInfo?> = _adapterInfo.asStateFlow()
+
+    // Keyed by MAC so repeated frames from the same peer update one entry instead of
+    // growing unbounded; cleared on stopCapture like the other per-session state above.
+    private val peerDevicesByMac = mutableMapOf<String, PeerDevice>()
+    private val _peerDevices = MutableStateFlow<List<PeerDevice>>(emptyList())
+    val peerDevices: StateFlow<List<PeerDevice>> = _peerDevices.asStateFlow()
 
     fun logDiag(msg: String) {
         Log.d(TAG, msg)
@@ -249,6 +284,16 @@ class UsbConnectionManager(private val context: Context) {
             claimedInterfaces.clear()
             logDiag("UsbDeviceConnection opened successfully.")
 
+            val matchedInfoDriver = vendorDrivers.firstOrNull { it.matches(device) }
+            _adapterInfo.value = AdapterInfo(
+                deviceName = device.deviceName ?: "USB Ethernet Adapter",
+                vendorId = device.vendorId,
+                productId = device.productId,
+                driverName = matchedInfoDriver?.name,
+                maxLinkMbps = matchedInfoDriver?.maxLinkMbps,
+                supported = matchedInfoDriver != null
+            )
+
             // Diagnostic: if the kernel already owns this device (eth0/usb0/enx*), its
             // r8152/cdc_ether driver is actively reprogramming the same registers we're
             // about to touch, which is a likely cause of every write below returning -1.
@@ -399,7 +444,9 @@ class UsbConnectionManager(private val context: Context) {
                     if (matchedDriver != null) {
                         logDiag("Matched vendor adapter driver: ${matchedDriver.name}")
                         vendorRxConfirmed = matchedDriver.bringUp(connection, ::logDiag)
-                        _linkState.value = matchedDriver.pollLinkUp(connection, ::logDiag)
+                        val initialStatus = matchedDriver.readLinkStatus(connection, ::logDiag)
+                        _linkStatus.value = initialStatus
+                        _linkState.value = initialStatus?.up
                     } else {
                         logDiag("No known vendor adapter driver for VID 0x${String.format("%04X", device.vendorId)} / PID 0x${String.format("%04X", device.productId)} - skipping chip-specific bring-up.")
                         vendorRxConfirmed = true
@@ -486,7 +533,9 @@ class UsbConnectionManager(private val context: Context) {
                 // when the state actually changes, to avoid spamming the log every 2s.
                 if (driver != null && now - lastLinkPollTime >= 2000) {
                     lastLinkPollTime = now
-                    val newLinkUp = driver.pollLinkUp(connection, ::logDiag)
+                    val newStatus = driver.readLinkStatus(connection, ::logDiag)
+                    val newLinkUp = newStatus?.up
+                    _linkStatus.value = newStatus
                     if (newLinkUp != _linkState.value) {
                         val wasUp = _linkState.value == true
                         _linkState.value = newLinkUp
@@ -510,11 +559,42 @@ class UsbConnectionManager(private val context: Context) {
                     val packets = PacketParser.parseAggregateFrames(readBuffer, bytesRead)
                     for (packet in packets) {
                         logDiag("SUCCESS: Parsed ${packet.protocol} frame from ${packet.srcMac} to ${packet.dstMac}")
+                        // Full field dump (not just TLV headers) so a capture can be fully
+                        // debugged from the exported log alone - the USB-C port is occupied
+                        // by the adapter during capture, so live adb inspection isn't an
+                        // option while a session is running.
                         packet.lldpFrame?.let { lldp ->
                             logDiag("LLDP TLVs: ${lldp.tlvs.joinToString(", ") { "type=${it.type} len=${it.length}" }}")
-                            logDiag("LLDP portDescription=${lldp.portDescription}")
+                            logDiag(
+                                "LLDP fields: chassisId=${lldp.chassisId} (subtype=${lldp.chassisIdSubtype}), " +
+                                    "portId=${lldp.portId} (subtype=${lldp.portIdSubtype}), ttl=${lldp.ttl}, " +
+                                    "portDescription=${lldp.portDescription}, systemName=${lldp.systemName}, " +
+                                    "systemDescription=${lldp.systemDescription}, systemCapabilities=${lldp.systemCapabilities}, " +
+                                    "managementAddress=${lldp.managementAddress}, vlanId=${lldp.vlanId}"
+                            )
+                        }
+                        packet.cdpFrame?.let { cdp ->
+                            logDiag(
+                                "CDP fields: deviceId=${cdp.deviceId}, portId=${cdp.portId}, platform=${cdp.platform}, " +
+                                    "addresses=${cdp.addresses}, duplex=${cdp.duplex}, nativeVlan=${cdp.nativeVlan}, " +
+                                    "capabilities=${cdp.capabilities}, softwareVersion=${cdp.softwareVersion}, " +
+                                    "ttl=${cdp.ttl}, version=${cdp.version}"
+                            )
                         }
                         _capturedPackets.emit(packet)
+                    }
+
+                    PacketParser.parseGenericFrame(readBuffer, bytesRead)?.let { peer ->
+                        val existing = peerDevicesByMac[peer.srcMac]
+                        peerDevicesByMac[peer.srcMac] = PeerDevice(
+                            mac = peer.srcMac,
+                            ip = peer.srcIp ?: existing?.ip,
+                            protocolLabel = peer.protocolLabel,
+                            firstSeen = existing?.firstSeen ?: now,
+                            lastSeen = now,
+                            frameCount = (existing?.frameCount ?: 0) + 1
+                        )
+                        _peerDevices.value = peerDevicesByMac.values.sortedByDescending { it.lastSeen }
                     }
                 } else if (bytesRead < 0) {
                     consecutiveErrors++
@@ -565,6 +645,10 @@ class UsbConnectionManager(private val context: Context) {
         activeDevice = null
         activeVendorDriver = null
         _linkState.value = null
+        _linkStatus.value = null
+        _adapterInfo.value = null
+        peerDevicesByMac.clear()
+        _peerDevices.value = emptyList()
         _connectionState.value = UsbConnectionState.Disconnected
     }
 

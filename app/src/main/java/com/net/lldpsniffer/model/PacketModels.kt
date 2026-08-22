@@ -12,6 +12,13 @@ enum class ProtocolType {
     UNKNOWN
 }
 
+/** Source MAC/IP/EtherType decoded from any Ethernet frame, not just LLDP/CDP. */
+data class PeerFrameInfo(
+    val srcMac: String,
+    val srcIp: String?,
+    val protocolLabel: String
+)
+
 data class LldpTlv(
     val type: Int,
     val length: Int,
@@ -119,7 +126,11 @@ fun MergedSwitchportRecord.mergeWithPacket(packet: CapturedPacket): MergedSwitch
     return copy(
         switchName = lldp?.systemName ?: cdp?.deviceId ?: switchName,
         portId = lldp?.portId ?: cdp?.portId ?: portId,
-        chassisId = lldp?.chassisId ?: cdp?.platform ?: chassisId,
+        // cdp.platform is a hardware model string, not a real chassis identifier - it's only
+        // a stand-in for switches that never send an LLDP frame. Once a genuine LLDP chassisId
+        // has been captured, a later CDP frame (which has no chassisId of its own) must not
+        // clobber it with the model string.
+        chassisId = lldp?.chassisId ?: chassisId ?: cdp?.platform,
         vlanId = lldp?.vlanId ?: cdp?.nativeVlan ?: vlanId,
         managementIp = lldp?.managementAddress ?: cdp?.addresses?.firstOrNull() ?: managementIp,
         duplex = cdp?.duplex ?: duplex,

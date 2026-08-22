@@ -149,6 +149,69 @@ object PacketParser {
         return Pair(rawBytes, length)
     }
 
+    // EtherTypes we treat as evidence of a genuine frame boundary when validating a
+    // candidate offset for parseGenericFrame. Values <= 1500 are handled separately as
+    // 802.3 length fields (also a valid frame).
+    private val PLAUSIBLE_ETHERTYPES = setOf(0x0800, 0x0806, 0x86DD, 0x8100, 0x88A8, 0x88CC)
+
+    /**
+     * Best-effort extraction of source MAC/IP from ANY Ethernet frame (not just LLDP/CDP),
+     * for passively identifying a directly-connected peer that doesn't speak LLDP/CDP.
+     * We don't have a verified per-chipset RX descriptor layout the way parseFrame does via
+     * its LLDP/CDP destination-MAC scan, so this instead validates candidate frame-start
+     * offsets by checking for a plausible EtherType/802.3-length field 12 bytes in - offset 0
+     * (no descriptor prefix; true for AX88772/AX88179 vendor mode) and offset 8 (the known
+     * RTL8153 8-byte RX descriptor prefix) are tried in that order.
+     */
+    fun parseGenericFrame(rawBytes: ByteArray, length: Int): PeerFrameInfo? {
+        if (length < 14) return null
+
+        for (offset in intArrayOf(0, 8)) {
+            if (offset + 14 > length) continue
+            val etherType = getUnsignedShort(rawBytes, offset + 12)
+            if (etherType !in PLAUSIBLE_ETHERTYPES && etherType > 1500) continue
+
+            val srcMac = rawBytes.sliceArray(offset + 6 until offset + 12)
+            if (srcMac.all { it == 0.toByte() }) continue
+
+            var payloadOffset = offset + 12
+            var type = etherType
+            if (type == 0x8100 || type == 0x88A8) {
+                if (offset + 18 > length) continue
+                payloadOffset += 4
+                type = getUnsignedShort(rawBytes, payloadOffset)
+            }
+
+            val srcIp = when (type) {
+                0x0806 -> extractArpSenderIp(rawBytes, payloadOffset + 2, length)
+                0x0800 -> extractIpv4SrcIp(rawBytes, payloadOffset + 2, length)
+                else -> null
+            }
+            val label = when (type) {
+                0x0800 -> "IPv4"
+                0x0806 -> "ARP"
+                0x86DD -> "IPv6"
+                0x88CC -> "LLDP"
+                else -> if (type <= 1500) "802.3" else "0x${String.format(Locale.US, "%04X", type)}"
+            }
+
+            return PeerFrameInfo(formatMacAddress(srcMac), srcIp, label)
+        }
+        return null
+    }
+
+    /** ARP sender IP sits 14 bytes into the ARP payload (hw/proto type/len, opcode, sender MAC). */
+    private fun extractArpSenderIp(rawBytes: ByteArray, arpStart: Int, length: Int): String? {
+        if (arpStart + 18 > length) return null
+        return formatIpAddress(rawBytes.sliceArray(arpStart + 14 until arpStart + 18))
+    }
+
+    /** IPv4 source address sits 12 bytes into the IP header. */
+    private fun extractIpv4SrcIp(rawBytes: ByteArray, ipStart: Int, length: Int): String? {
+        if (ipStart + 16 > length) return null
+        return formatIpAddress(rawBytes.sliceArray(ipStart + 12 until ipStart + 16))
+    }
+
     private fun isCdpLlcSnap(rawBytes: ByteArray, offset: Int): Boolean {
         // LLC/SNAP header check: DSAP=0xAA, SSAP=0xAA, Control=0x03, OUI=0x00000C, Protocol=0x2000
         if (rawBytes.size < offset + 8) return false
@@ -246,16 +309,21 @@ object PacketParser {
                 }
                 7 -> { // System Capabilities
                     if (length >= 4) {
-                        val sysCapBits = getUnsignedShort(valueBytes, 0)
                         val enabledCapBits = getUnsignedShort(valueBytes, 2)
-                        sysCaps = decodeLldpCapabilities(sysCapBits, enabledCapBits)
+                        sysCaps = decodeLldpCapabilities(enabledCapBits)
                     }
                 }
                 8 -> { // Management Address
                     if (length >= 2) {
-                        val addrLen = valueBytes[0].toInt() and 0xFF
+                        // Per IEEE 802.1AB, this length byte counts the address-subtype byte
+                        // PLUS the address itself, not just the address - using it directly as
+                        // the address byte count grabs one extra trailing byte (the interface
+                        // numbering subtype that follows) and produces garbled output (e.g. a
+                        // 4-byte IPv4 address rendered as 5 bytes of hex instead of a dotted quad).
+                        val addrFieldLen = valueBytes[0].toInt() and 0xFF
                         val addrSubtype = valueBytes[1].toInt() and 0xFF
-                        if (length >= 2 + addrLen) {
+                        val addrLen = addrFieldLen - 1
+                        if (addrLen > 0 && length >= 2 + addrLen) {
                             val addrBytes = valueBytes.sliceArray(2 until 2 + addrLen)
                             mgmtAddr = if (addrSubtype == 1 && addrLen == 4) {
                                 formatIpAddress(addrBytes)
@@ -448,7 +516,7 @@ object PacketParser {
                 (bytes[offset + 3].toInt() and 0xFF)
     }
 
-    private fun decodeLldpCapabilities(sysCap: Int, enabledCap: Int): String {
+    private fun decodeLldpCapabilities(enabledCap: Int): String {
         val caps = mutableListOf<String>()
         if (enabledCap and 0x0001 != 0) caps.add("Other")
         if (enabledCap and 0x0002 != 0) caps.add("Repeater")
