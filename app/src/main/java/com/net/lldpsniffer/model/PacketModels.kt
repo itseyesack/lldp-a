@@ -152,47 +152,117 @@ fun MergedSwitchportRecord.isComplete(): Boolean =
 fun MergedSwitchportRecord.displayTitle(): String =
     name ?: "${switchName ?: "Unnamed"} · ${portId ?: "?"}"
 
-data class CopyFieldsConfig(
-    val switchName: Boolean = true,
-    val portId: Boolean = true,
-    val chassisId: Boolean = true,
-    val vlanId: Boolean = true,
-    val managementIp: Boolean = true,
-    val duplex: Boolean = true,
-    val portDescription: Boolean = true,
-    val systemDescription: Boolean = true,
-    val platform: Boolean = true,
-    val softwareVersion: Boolean = true,
-    val capabilities: Boolean = true,
-    val protocols: Boolean = true,
-    val packetCount: Boolean = true,
-    val timestamps: Boolean = true
+enum class CopyFieldId {
+    SWITCH_NAME,
+    PORT_ID,
+    CHASSIS_ID,
+    VLAN_ID,
+    MANAGEMENT_IP,
+    DUPLEX,
+    PORT_DESCRIPTION,
+    SYSTEM_DESCRIPTION,
+    PLATFORM,
+    SOFTWARE_VERSION,
+    CAPABILITIES,
+    PROTOCOLS,
+    PACKET_COUNT,
+    TIMESTAMPS;
+
+    fun defaultLabel(): String = when (this) {
+        SWITCH_NAME -> "Switch Hostname"
+        PORT_ID -> "Port ID"
+        CHASSIS_ID -> "Chassis ID / Model"
+        VLAN_ID -> "VLAN ID"
+        MANAGEMENT_IP -> "Management IP"
+        DUPLEX -> "Duplex"
+        PORT_DESCRIPTION -> "Interface Description"
+        SYSTEM_DESCRIPTION -> "System Description"
+        PLATFORM -> "Platform"
+        SOFTWARE_VERSION -> "Software Version"
+        CAPABILITIES -> "Capabilities"
+        PROTOCOLS -> "Protocols Seen"
+        PACKET_COUNT -> "Packet Count"
+        TIMESTAMPS -> "Timestamps"
+    }
+
+    /** Placeholder key used in webhook templates, e.g. "{{vlan_id}}". */
+    fun templateKey(): String = name.lowercase()
+}
+
+data class CopyFieldConfig(
+    val id: CopyFieldId,
+    val label: String = id.defaultLabel(),
+    val enabled: Boolean = true
 )
 
-fun MergedSwitchportRecord.toDisplayText(config: CopyFieldsConfig = CopyFieldsConfig()): String {
+data class CopyFieldsConfig(
+    val fields: List<CopyFieldConfig> = CopyFieldId.entries.map { CopyFieldConfig(it) }
+) {
+    fun labelFor(id: CopyFieldId): String = fields.firstOrNull { it.id == id }?.label ?: id.defaultLabel()
+    fun isEnabled(id: CopyFieldId): Boolean = fields.firstOrNull { it.id == id }?.enabled ?: true
+}
+
+enum class CopyFormat {
+    BASIC,
+    MARKDOWN,
+    JSON
+}
+
+/**
+ * Raw string form of a field's value, or null when there's nothing to show. The 5 "identity"
+ * fields fall back to "N/A" to match the legacy plain-text renderer's behavior exactly; other
+ * optional fields return null (and callers omit the line/key) exactly as before.
+ */
+fun MergedSwitchportRecord.rawValueFor(id: CopyFieldId, dateFormat: SimpleDateFormat): String? = when (id) {
+    CopyFieldId.SWITCH_NAME -> switchName ?: "N/A"
+    CopyFieldId.PORT_ID -> portId ?: "N/A"
+    CopyFieldId.CHASSIS_ID -> chassisId ?: "N/A"
+    CopyFieldId.VLAN_ID -> vlanId?.toString() ?: "N/A"
+    CopyFieldId.MANAGEMENT_IP -> managementIp ?: "N/A"
+    CopyFieldId.DUPLEX -> duplex
+    CopyFieldId.PORT_DESCRIPTION -> portDescription
+    CopyFieldId.SYSTEM_DESCRIPTION -> systemDescription
+    CopyFieldId.PLATFORM -> platform
+    CopyFieldId.SOFTWARE_VERSION -> softwareVersion
+    CopyFieldId.CAPABILITIES -> capabilities
+    CopyFieldId.PROTOCOLS ->
+        listOfNotNull(if (hasLldp) "LLDP" else null, if (hasCdp) "CDP" else null).joinToString(", ").ifEmpty { "None" }
+    CopyFieldId.PACKET_COUNT -> packetCount.toString()
+    CopyFieldId.TIMESTAMPS -> {
+        val start = "Start: ${dateFormat.format(Date(startTime))}"
+        val end = endTime?.let { "End: ${dateFormat.format(Date(it))}" }
+        listOfNotNull(start, end).joinToString(", ")
+    }
+}
+
+fun MergedSwitchportRecord.toCopyText(config: CopyFieldsConfig = CopyFieldsConfig(), format: CopyFormat = CopyFormat.BASIC): String {
     val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-    val lines = mutableListOf<String>()
-    lines.add(displayTitle())
-    if (config.switchName) lines.add("Switch: ${switchName ?: "N/A"}")
-    if (config.portId) lines.add("Port: ${portId ?: "N/A"}")
-    if (config.chassisId) lines.add("Chassis ID: ${chassisId ?: "N/A"}")
-    if (config.vlanId) lines.add("VLAN: ${vlanId?.toString() ?: "N/A"}")
-    if (config.managementIp) lines.add("Management IP: ${managementIp ?: "N/A"}")
-    if (config.duplex) duplex?.let { lines.add("Duplex: $it") }
-    if (config.portDescription) portDescription?.let { lines.add("Interface Description: $it") }
-    if (config.systemDescription) systemDescription?.let { lines.add("System Description: $it") }
-    if (config.platform) platform?.let { lines.add("Platform: $it") }
-    if (config.softwareVersion) softwareVersion?.let { lines.add("Software Version: $it") }
-    if (config.capabilities) capabilities?.let { lines.add("Capabilities: $it") }
-    if (config.protocols) {
-        lines.add("Protocols seen: ${listOfNotNull(if (hasLldp) "LLDP" else null, if (hasCdp) "CDP" else null).joinToString(", ").ifEmpty { "None" }}")
+    val enabledFields = config.fields.filter { it.enabled }
+
+    return when (format) {
+        CopyFormat.BASIC -> {
+            val lines = mutableListOf<String>()
+            enabledFields.forEach { field ->
+                rawValueFor(field.id, dateFormat)?.let { lines.add("${field.label}: $it") }
+            }
+            lines.joinToString("\n")
+        }
+        CopyFormat.MARKDOWN -> {
+            val lines = mutableListOf<String>()
+            lines.add("### ${displayTitle()}")
+            enabledFields.forEach { field ->
+                rawValueFor(field.id, dateFormat)?.let { lines.add("**${field.label}:** $it") }
+            }
+            lines.joinToString("\n")
+        }
+        CopyFormat.JSON -> {
+            val obj = JSONObject()
+            enabledFields.forEach { field ->
+                obj.put(field.id.name, rawValueFor(field.id, dateFormat))
+            }
+            obj.toString(2)
+        }
     }
-    if (config.packetCount) lines.add("Packets: $packetCount")
-    if (config.timestamps) {
-        lines.add("Start: ${dateFormat.format(Date(startTime))}")
-        endTime?.let { lines.add("End: ${dateFormat.format(Date(it))}") }
-    }
-    return lines.joinToString("\n")
 }
 
 fun MergedSwitchportRecord.toJson(): JSONObject = JSONObject().apply {

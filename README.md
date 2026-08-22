@@ -39,6 +39,13 @@ them, `assembleRelease` produces an unsigned APK.
 GitHub Actions builds debug and release APKs on every push/PR and publishes a GitHub
 Release with the signed APK on pushes to `main` (see `.github/workflows/build.yml`).
 
+## Documentation
+
+- [docs/USAGE.md](docs/USAGE.md) — connecting an adapter, running a capture session,
+  managing history, and a full walkthrough of the Settings page.
+- [docs/WEBHOOK_TEMPLATES.md](docs/WEBHOOK_TEMPLATES.md) — sending session results to a
+  webhook (Discord or any JSON endpoint), including the custom template/placeholder system.
+
 ## License
 
 MIT

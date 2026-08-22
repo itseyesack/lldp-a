@@ -1,12 +1,20 @@
 package com.net.lldpsniffer.data
 
 import android.content.Context
+import com.net.lldpsniffer.model.CopyFieldConfig
+import com.net.lldpsniffer.model.CopyFieldId
 import com.net.lldpsniffer.model.CopyFieldsConfig
+import com.net.lldpsniffer.model.CopyFormat
+import com.net.lldpsniffer.model.WebhookConfig
+import org.json.JSONArray
+import org.json.JSONObject
 
 class SettingsStore(context: Context) {
 
     companion object {
         private const val PREFS_NAME = "settings"
+
+        // Legacy (pre-v2) per-field boolean keys, kept only to migrate existing installs once.
         private const val KEY_SWITCH_NAME = "copy_switch_name"
         private const val KEY_PORT_ID = "copy_port_id"
         private const val KEY_CHASSIS_ID = "copy_chassis_id"
@@ -20,46 +28,129 @@ class SettingsStore(context: Context) {
         private const val KEY_PROTOCOLS = "copy_protocols"
         private const val KEY_PACKET_COUNT = "copy_packet_count"
         private const val KEY_TIMESTAMPS = "copy_timestamps"
+
         private const val KEY_SHOW_LOG_VIEWS = "show_log_views"
+        private const val KEY_COPY_FIELDS_V2 = "copy_fields_v2_json"
+        private const val KEY_COPY_FORMAT = "copy_format"
+        private const val KEY_WEBHOOK_CONFIG = "webhook_config_json"
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun loadCopyFieldsConfig(): CopyFieldsConfig {
+        val stored = prefs.getString(KEY_COPY_FIELDS_V2, null)
+        if (stored != null) {
+            return deserializeCopyFields(stored)
+        }
+        val migrated = migrateLegacyCopyFieldsConfig()
+        saveCopyFieldsConfig(migrated)
+        return migrated
+    }
+
+    private fun migrateLegacyCopyFieldsConfig(): CopyFieldsConfig {
         val defaults = CopyFieldsConfig()
-        return CopyFieldsConfig(
-            switchName = prefs.getBoolean(KEY_SWITCH_NAME, defaults.switchName),
-            portId = prefs.getBoolean(KEY_PORT_ID, defaults.portId),
-            chassisId = prefs.getBoolean(KEY_CHASSIS_ID, defaults.chassisId),
-            vlanId = prefs.getBoolean(KEY_VLAN_ID, defaults.vlanId),
-            managementIp = prefs.getBoolean(KEY_MANAGEMENT_IP, defaults.managementIp),
-            duplex = prefs.getBoolean(KEY_DUPLEX, defaults.duplex),
-            systemDescription = prefs.getBoolean(KEY_SYSTEM_DESCRIPTION, defaults.systemDescription),
-            platform = prefs.getBoolean(KEY_PLATFORM, defaults.platform),
-            softwareVersion = prefs.getBoolean(KEY_SOFTWARE_VERSION, defaults.softwareVersion),
-            capabilities = prefs.getBoolean(KEY_CAPABILITIES, defaults.capabilities),
-            protocols = prefs.getBoolean(KEY_PROTOCOLS, defaults.protocols),
-            packetCount = prefs.getBoolean(KEY_PACKET_COUNT, defaults.packetCount),
-            timestamps = prefs.getBoolean(KEY_TIMESTAMPS, defaults.timestamps)
-        )
+        fun enabledFor(id: CopyFieldId): Boolean = when (id) {
+            CopyFieldId.SWITCH_NAME -> prefs.getBoolean(KEY_SWITCH_NAME, true)
+            CopyFieldId.PORT_ID -> prefs.getBoolean(KEY_PORT_ID, true)
+            CopyFieldId.CHASSIS_ID -> prefs.getBoolean(KEY_CHASSIS_ID, true)
+            CopyFieldId.VLAN_ID -> prefs.getBoolean(KEY_VLAN_ID, true)
+            CopyFieldId.MANAGEMENT_IP -> prefs.getBoolean(KEY_MANAGEMENT_IP, true)
+            CopyFieldId.DUPLEX -> prefs.getBoolean(KEY_DUPLEX, true)
+            // The legacy store never actually persisted this key despite the old Settings
+            // dialog showing a checkbox for it, so it always behaved as enabled.
+            CopyFieldId.PORT_DESCRIPTION -> true
+            CopyFieldId.SYSTEM_DESCRIPTION -> prefs.getBoolean(KEY_SYSTEM_DESCRIPTION, true)
+            CopyFieldId.PLATFORM -> prefs.getBoolean(KEY_PLATFORM, true)
+            CopyFieldId.SOFTWARE_VERSION -> prefs.getBoolean(KEY_SOFTWARE_VERSION, true)
+            CopyFieldId.CAPABILITIES -> prefs.getBoolean(KEY_CAPABILITIES, true)
+            CopyFieldId.PROTOCOLS -> prefs.getBoolean(KEY_PROTOCOLS, true)
+            CopyFieldId.PACKET_COUNT -> prefs.getBoolean(KEY_PACKET_COUNT, true)
+            CopyFieldId.TIMESTAMPS -> prefs.getBoolean(KEY_TIMESTAMPS, true)
+        }
+        return CopyFieldsConfig(defaults.fields.map { it.copy(enabled = enabledFor(it.id)) })
+    }
+
+    private fun deserializeCopyFields(json: String): CopyFieldsConfig {
+        val array = JSONArray(json)
+        val parsed = mutableListOf<CopyFieldConfig>()
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val id = try {
+                CopyFieldId.valueOf(obj.getString("id"))
+            } catch (e: IllegalArgumentException) {
+                continue
+            }
+            parsed.add(
+                CopyFieldConfig(
+                    id = id,
+                    label = obj.optString("label", id.defaultLabel()),
+                    enabled = obj.optBoolean("enabled", true)
+                )
+            )
+        }
+        // Backfill any field type missing from a saved blob (e.g. a future new field added
+        // after this config was last saved) by appending it at the end with its default.
+        val presentIds = parsed.map { it.id }.toSet()
+        CopyFieldId.entries.filterNot { it in presentIds }.forEach { parsed.add(CopyFieldConfig(it)) }
+        return CopyFieldsConfig(parsed)
     }
 
     fun saveCopyFieldsConfig(config: CopyFieldsConfig) {
-        prefs.edit()
-            .putBoolean(KEY_SWITCH_NAME, config.switchName)
-            .putBoolean(KEY_PORT_ID, config.portId)
-            .putBoolean(KEY_CHASSIS_ID, config.chassisId)
-            .putBoolean(KEY_VLAN_ID, config.vlanId)
-            .putBoolean(KEY_MANAGEMENT_IP, config.managementIp)
-            .putBoolean(KEY_DUPLEX, config.duplex)
-            .putBoolean(KEY_SYSTEM_DESCRIPTION, config.systemDescription)
-            .putBoolean(KEY_PLATFORM, config.platform)
-            .putBoolean(KEY_SOFTWARE_VERSION, config.softwareVersion)
-            .putBoolean(KEY_CAPABILITIES, config.capabilities)
-            .putBoolean(KEY_PROTOCOLS, config.protocols)
-            .putBoolean(KEY_PACKET_COUNT, config.packetCount)
-            .putBoolean(KEY_TIMESTAMPS, config.timestamps)
-            .apply()
+        val array = JSONArray()
+        config.fields.forEach { field ->
+            array.put(
+                JSONObject().apply {
+                    put("id", field.id.name)
+                    put("label", field.label)
+                    put("enabled", field.enabled)
+                }
+            )
+        }
+        prefs.edit().putString(KEY_COPY_FIELDS_V2, array.toString()).apply()
+    }
+
+    fun loadCopyFormat(): CopyFormat {
+        val stored = prefs.getString(KEY_COPY_FORMAT, null) ?: return CopyFormat.BASIC
+        return try {
+            CopyFormat.valueOf(stored)
+        } catch (e: IllegalArgumentException) {
+            CopyFormat.BASIC
+        }
+    }
+
+    fun saveCopyFormat(format: CopyFormat) {
+        prefs.edit().putString(KEY_COPY_FORMAT, format.name).apply()
+    }
+
+    fun loadWebhookConfig(): WebhookConfig {
+        val stored = prefs.getString(KEY_WEBHOOK_CONFIG, null) ?: return WebhookConfig()
+        return try {
+            val obj = JSONObject(stored)
+            WebhookConfig(
+                enabled = obj.optBoolean("enabled", false),
+                url = obj.optString("url", ""),
+                deviceName = obj.optString("deviceName", ""),
+                authHeaderName = obj.optString("authHeaderName", ""),
+                authHeaderValue = obj.optString("authHeaderValue", ""),
+                useCustomTemplate = obj.optBoolean("useCustomTemplate", false),
+                template = obj.optString("template", WebhookConfig.DEFAULT_DISCORD_TEMPLATE)
+            )
+        } catch (e: Exception) {
+            WebhookConfig()
+        }
+    }
+
+    fun saveWebhookConfig(config: WebhookConfig) {
+        val obj = JSONObject().apply {
+            put("enabled", config.enabled)
+            put("url", config.url)
+            put("deviceName", config.deviceName)
+            put("authHeaderName", config.authHeaderName)
+            put("authHeaderValue", config.authHeaderValue)
+            put("useCustomTemplate", config.useCustomTemplate)
+            put("template", config.template)
+        }
+        prefs.edit().putString(KEY_WEBHOOK_CONFIG, obj.toString()).apply()
     }
 
     fun loadShowLogViews(): Boolean = prefs.getBoolean(KEY_SHOW_LOG_VIEWS, false)

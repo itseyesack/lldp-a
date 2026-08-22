@@ -22,9 +22,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.net.lldpsniffer.model.CopyFieldsConfig
+import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.ProtocolType
-import com.net.lldpsniffer.model.toDisplayText
+import com.net.lldpsniffer.model.toCopyText
 import com.net.lldpsniffer.usb.PeerDevice
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -37,6 +38,7 @@ fun SwitchportCard(
     recordFinalized: Boolean = false,
     soloHostPeer: PeerDevice? = null,
     copyFieldsConfig: CopyFieldsConfig = CopyFieldsConfig(),
+    copyFormat: CopyFormat = CopyFormat.BASIC,
     onRenameClick: () -> Unit = {},
     onEndRecordClick: () -> Unit = {}
 ) {
@@ -86,7 +88,7 @@ fun SwitchportCard(
             if (linkUp == true && info != null) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    IconButton(onClick = { clipboardManager.setText(AnnotatedString(info.toDisplayText(copyFieldsConfig))) }) {
+                    IconButton(onClick = { clipboardManager.setText(AnnotatedString(info.toCopyText(copyFieldsConfig, copyFormat))) }) {
                         Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy to Clipboard")
                     }
                     IconButton(onClick = onRenameClick) {

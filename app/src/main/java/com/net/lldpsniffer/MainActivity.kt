@@ -25,7 +25,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.net.lldpsniffer.service.PacketSnifferService
-import com.net.lldpsniffer.ui.MainScreen
+import com.net.lldpsniffer.ui.AppNavHost
 import com.net.lldpsniffer.ui.theme.AndroidLLDPSnifferTheme
 import com.net.lldpsniffer.usb.UsbConnectionState
 import com.net.lldpsniffer.viewmodel.MainViewModel
@@ -137,7 +137,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AndroidLLDPSnifferTheme {
-                MainScreen(
+                AppNavHost(
                     viewModel = viewModel,
                     onRequestPermission = { requestDevicePermission() },
                     onStartCapture = { checkAndStartDeviceCapture() },

@@ -35,7 +35,8 @@ fun MainScreen(
     viewModel: MainViewModel,
     onRequestPermission: () -> Unit,
     onStartCapture: () -> Unit,
-    onStopCapture: () -> Unit
+    onStopCapture: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val connectionState by viewModel.connectionState.collectAsState()
@@ -52,10 +53,10 @@ fun MainScreen(
     val selectedPacket by viewModel.selectedPacket.collectAsState()
     val diagnosticLogs by viewModel.diagnosticLogs.collectAsState()
     val copyFieldsConfig by viewModel.copyFieldsConfig.collectAsState()
+    val copyFormat by viewModel.copyFormat.collectAsState()
     val showLogViews by viewModel.showLogViews.collectAsState()
 
     var showHelpDialog by remember { mutableStateOf(false) }
-    var showSettingsDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<com.net.lldpsniffer.model.MergedSwitchportRecord?>(null) }
     var detailTarget by remember { mutableStateOf<com.net.lldpsniffer.model.MergedSwitchportRecord?>(null) }
     var showAdapterInfoDialog by remember { mutableStateOf(false) }
@@ -88,7 +89,7 @@ fun MainScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showSettingsDialog = true }) {
+                    IconButton(onClick = onOpenSettings) {
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Settings"
@@ -132,6 +133,7 @@ fun MainScreen(
                 recordFinalized = currentRecordFinalized,
                 soloHostPeer = soloHostPeer,
                 copyFieldsConfig = copyFieldsConfig,
+                copyFormat = copyFormat,
                 onRenameClick = { currentRecord?.let { renameTarget = it } },
                 onEndRecordClick = { viewModel.endCurrentRecordManually() }
             )
@@ -144,7 +146,8 @@ fun MainScreen(
                 onRenameRecord = { record -> renameTarget = record },
                 onDeleteRecord = { record -> viewModel.deleteHistoryRecord(record.id) },
                 onRecordClick = { record -> detailTarget = record },
-                copyFieldsConfig = copyFieldsConfig
+                copyFieldsConfig = copyFieldsConfig,
+                copyFormat = copyFormat
             )
 
             // Passively-observed directly-connected peers (any Ethernet traffic, not just LLDP/CDP)
@@ -202,6 +205,7 @@ fun MainScreen(
         RecordDetailDialog(
             record = record,
             copyFieldsConfig = copyFieldsConfig,
+            copyFormat = copyFormat,
             onDismiss = { detailTarget = null }
         )
     }
@@ -219,17 +223,6 @@ fun MainScreen(
 
     if (showHelpDialog) {
         HelpDialog(onDismiss = { showHelpDialog = false })
-    }
-
-    if (showSettingsDialog) {
-        SettingsDialog(
-            copyFieldsConfig = copyFieldsConfig,
-            showLogViews = showLogViews,
-            onDismiss = { showSettingsDialog = false },
-            onConfigChange = { viewModel.updateCopyFieldsConfig(it) },
-            onShowLogViewsChange = { viewModel.setShowLogViews(it) },
-            onClearAllHistory = { viewModel.clearAllHistory() }
-        )
     }
 }
 

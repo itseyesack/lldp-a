@@ -15,9 +15,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.net.lldpsniffer.model.CopyFieldsConfig
+import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.displayTitle
-import com.net.lldpsniffer.model.toDisplayText
+import com.net.lldpsniffer.model.toCopyText
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -26,6 +27,7 @@ import java.util.Locale
 fun RecordDetailDialog(
     record: MergedSwitchportRecord,
     copyFieldsConfig: CopyFieldsConfig,
+    copyFormat: CopyFormat = CopyFormat.BASIC,
     onDismiss: () -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
@@ -59,7 +61,7 @@ fun RecordDetailDialog(
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(onClick = {
-                        clipboardManager.setText(AnnotatedString(record.toDisplayText(copyFieldsConfig)))
+                        clipboardManager.setText(AnnotatedString(record.toCopyText(copyFieldsConfig, copyFormat)))
                     }) {
                         Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy to Clipboard")
                     }

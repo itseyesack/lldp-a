@@ -10,8 +10,10 @@ import com.net.lldpsniffer.data.RecordStore
 import com.net.lldpsniffer.data.SettingsStore
 import com.net.lldpsniffer.model.CapturedPacket
 import com.net.lldpsniffer.model.CopyFieldsConfig
+import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.ProtocolType
+import com.net.lldpsniffer.model.WebhookConfig
 import com.net.lldpsniffer.model.isComplete
 import com.net.lldpsniffer.model.mergeWithPacket
 import com.net.lldpsniffer.model.toJson
@@ -20,6 +22,7 @@ import com.net.lldpsniffer.usb.AdapterInfo
 import com.net.lldpsniffer.usb.PeerDevice
 import com.net.lldpsniffer.usb.UsbConnectionState
 import com.net.lldpsniffer.usb.driver.LinkStatus
+import com.net.lldpsniffer.webhook.WebhookSender
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -98,6 +101,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _copyFieldsConfig = MutableStateFlow(settingsStore.loadCopyFieldsConfig())
     val copyFieldsConfig: StateFlow<CopyFieldsConfig> = _copyFieldsConfig.asStateFlow()
+
+    private val _copyFormat = MutableStateFlow(settingsStore.loadCopyFormat())
+    val copyFormat: StateFlow<CopyFormat> = _copyFormat.asStateFlow()
+
+    private val _webhookConfig = MutableStateFlow(settingsStore.loadWebhookConfig())
+    val webhookConfig: StateFlow<WebhookConfig> = _webhookConfig.asStateFlow()
 
     private val _showLogViews = MutableStateFlow(settingsStore.loadShowLogViews())
     val showLogViews: StateFlow<Boolean> = _showLogViews.asStateFlow()
@@ -209,11 +218,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun pushToHistory(record: MergedSwitchportRecord) {
+        val finalized = record.copy(endTime = record.endTime ?: System.currentTimeMillis())
         _history.update { current ->
             val withoutDuplicate = current.filterNot { it.id == record.id }
-            (listOf(record.copy(endTime = record.endTime ?: System.currentTimeMillis())) + withoutDuplicate).take(100)
+            (listOf(finalized) + withoutDuplicate).take(100)
         }
         recordStore.save(_history.value)
+        sendSessionWebhook(finalized)
+    }
+
+    private fun sendSessionWebhook(record: MergedSwitchportRecord) {
+        val config = _webhookConfig.value
+        if (!config.enabled || config.url.isBlank()) return
+        viewModelScope.launch {
+            val result = WebhookSender.send(config, record, _copyFieldsConfig.value)
+            val logSink = _service.value?.usbConnectionManager
+            if (result.success) {
+                logSink?.logDiag("Webhook sent successfully (HTTP ${result.httpCode})")
+            } else {
+                logSink?.logDiag("Webhook send failed: ${result.errorMessage}")
+            }
+        }
     }
 
     private fun finalizeSession() {
@@ -270,6 +295,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateCopyFieldsConfig(config: CopyFieldsConfig) {
         _copyFieldsConfig.value = config
         settingsStore.saveCopyFieldsConfig(config)
+    }
+
+    fun setCopyFormat(format: CopyFormat) {
+        _copyFormat.value = format
+        settingsStore.saveCopyFormat(format)
+    }
+
+    fun updateWebhookConfig(config: WebhookConfig) {
+        _webhookConfig.value = config
+        settingsStore.saveWebhookConfig(config)
+    }
+
+    fun sendTestWebhook(onResult: (WebhookSender.Result) -> Unit) {
+        val sample = MergedSwitchportRecord(
+            id = "test",
+            name = "Test Webhook Record",
+            startTime = System.currentTimeMillis(),
+            endTime = System.currentTimeMillis(),
+            switchName = "test-switch.example.com",
+            portId = "GigabitEthernet1/0/1",
+            chassisId = "Example-Switch-Model",
+            vlanId = 10,
+            managementIp = "192.0.2.1",
+            duplex = "Full",
+            portDescription = "Test Interface Description",
+            systemDescription = "Example system description string",
+            platform = "Example Platform",
+            softwareVersion = "1.0.0",
+            capabilities = "Switch, Router",
+            ttlSeconds = 120,
+            packetCount = 1,
+            hasLldp = true,
+            hasCdp = true
+        )
+        viewModelScope.launch {
+            val result = WebhookSender.send(_webhookConfig.value, sample, _copyFieldsConfig.value)
+            onResult(result)
+        }
     }
 
     fun setShowLogViews(show: Boolean) {

@@ -24,9 +24,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.net.lldpsniffer.model.CopyFieldsConfig
+import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.displayTitle
-import com.net.lldpsniffer.model.toDisplayText
+import com.net.lldpsniffer.model.toCopyText
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -40,6 +41,7 @@ fun HistoryCard(
     onDeleteRecord: (MergedSwitchportRecord) -> Unit,
     onRecordClick: (MergedSwitchportRecord) -> Unit,
     copyFieldsConfig: CopyFieldsConfig = CopyFieldsConfig(),
+    copyFormat: CopyFormat = CopyFormat.BASIC,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -111,7 +113,7 @@ fun HistoryCard(
                             HistoryItemRow(
                                 record = record,
                                 onClick = { onRecordClick(record) },
-                                onCopy = { clipboardManager.setText(AnnotatedString(record.toDisplayText(copyFieldsConfig))) },
+                                onCopy = { clipboardManager.setText(AnnotatedString(record.toCopyText(copyFieldsConfig, copyFormat))) },
                                 onExport = { onExportRecord(record) },
                                 onRename = { onRenameRecord(record) },
                                 onDelete = { onDeleteRecord(record) }
