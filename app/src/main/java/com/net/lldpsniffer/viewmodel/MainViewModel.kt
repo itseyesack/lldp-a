@@ -84,6 +84,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _copyFieldsConfig = MutableStateFlow(settingsStore.loadCopyFieldsConfig())
     val copyFieldsConfig: StateFlow<CopyFieldsConfig> = _copyFieldsConfig.asStateFlow()
 
+    private val _showLogViews = MutableStateFlow(settingsStore.loadShowLogViews())
+    val showLogViews: StateFlow<Boolean> = _showLogViews.asStateFlow()
+
     private var currentSessionId: String? = null
     private var sessionFinalizedThisSession = false
     private var linkDownDebounceJob: Job? = null
@@ -221,6 +224,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateCopyFieldsConfig(config: CopyFieldsConfig) {
         _copyFieldsConfig.value = config
         settingsStore.saveCopyFieldsConfig(config)
+    }
+
+    fun setShowLogViews(show: Boolean) {
+        _showLogViews.value = show
+        settingsStore.saveShowLogViews(show)
     }
 
     fun setFilter(filter: PacketFilter) {

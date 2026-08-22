@@ -45,10 +45,12 @@ fun MainScreen(
     val selectedPacket by viewModel.selectedPacket.collectAsState()
     val diagnosticLogs by viewModel.diagnosticLogs.collectAsState()
     val copyFieldsConfig by viewModel.copyFieldsConfig.collectAsState()
+    val showLogViews by viewModel.showLogViews.collectAsState()
 
     var showHelpDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<com.net.lldpsniffer.model.MergedSwitchportRecord?>(null) }
+    var detailTarget by remember { mutableStateOf<com.net.lldpsniffer.model.MergedSwitchportRecord?>(null) }
 
     fun shareJsonUri(uri: android.net.Uri?, title: String) {
         if (uri == null) return
@@ -129,35 +131,38 @@ fun MainScreen(
                 onExportRecord = { record -> shareJsonUri(viewModel.exportRecordToJson(context, record), "Share Record") },
                 onRenameRecord = { record -> renameTarget = record },
                 onDeleteRecord = { record -> viewModel.deleteHistoryRecord(record.id) },
+                onRecordClick = { record -> detailTarget = record },
                 copyFieldsConfig = copyFieldsConfig
             )
 
-            // Live Hardware Log Console
-            DiagnosticLogsCard(
-                logs = diagnosticLogs,
-                onExportLogs = {
-                    val uri = viewModel.exportHardwareLogs(context)
-                    if (uri != null) {
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (showLogViews) {
+                // Live Hardware Log Console
+                DiagnosticLogsCard(
+                    logs = diagnosticLogs,
+                    onExportLogs = {
+                        val uri = viewModel.exportHardwareLogs(context)
+                        if (uri != null) {
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "Export Hardware Diagnostic Logs"))
                         }
-                        context.startActivity(Intent.createChooser(shareIntent, "Export Hardware Diagnostic Logs"))
-                    }
-                },
-                onClearLogs = { viewModel.clearHardwareLogs() }
-            )
+                    },
+                    onClearLogs = { viewModel.clearHardwareLogs() }
+                )
 
-            // Raw Packet Log (collapsed by default)
-            PacketLogCard(
-                packets = filteredPackets,
-                selectedFilter = selectedFilter,
-                onFilterSelected = { viewModel.setFilter(it) },
-                onClearClick = { viewModel.clearPackets() },
-                onExportClick = { shareJsonUri(viewModel.exportPacketsToJson(context), "Share Captured Packets") },
-                onPacketClick = { viewModel.selectPacket(it) }
-            )
+                // Raw Packet Log (collapsed by default)
+                PacketLogCard(
+                    packets = filteredPackets,
+                    selectedFilter = selectedFilter,
+                    onFilterSelected = { viewModel.setFilter(it) },
+                    onClearClick = { viewModel.clearPackets() },
+                    onExportClick = { shareJsonUri(viewModel.exportPacketsToJson(context), "Share Captured Packets") },
+                    onPacketClick = { viewModel.selectPacket(it) }
+                )
+            }
         }
     }
 
@@ -165,6 +170,14 @@ fun MainScreen(
         PacketDetailDialog(
             packet = packet,
             onDismiss = { viewModel.selectPacket(null) }
+        )
+    }
+
+    detailTarget?.let { record ->
+        RecordDetailDialog(
+            record = record,
+            copyFieldsConfig = copyFieldsConfig,
+            onDismiss = { detailTarget = null }
         )
     }
 
@@ -186,8 +199,10 @@ fun MainScreen(
     if (showSettingsDialog) {
         SettingsDialog(
             copyFieldsConfig = copyFieldsConfig,
+            showLogViews = showLogViews,
             onDismiss = { showSettingsDialog = false },
             onConfigChange = { viewModel.updateCopyFieldsConfig(it) },
+            onShowLogViewsChange = { viewModel.setShowLogViews(it) },
             onClearAllHistory = { viewModel.clearAllHistory() }
         )
     }

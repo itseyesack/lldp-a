@@ -16,8 +16,10 @@ import com.net.lldpsniffer.model.CopyFieldsConfig
 @Composable
 fun SettingsDialog(
     copyFieldsConfig: CopyFieldsConfig,
+    showLogViews: Boolean,
     onDismiss: () -> Unit,
     onConfigChange: (CopyFieldsConfig) -> Unit,
+    onShowLogViewsChange: (Boolean) -> Unit,
     onClearAllHistory: () -> Unit
 ) {
     var config by remember(copyFieldsConfig) { mutableStateOf(copyFieldsConfig) }
@@ -49,6 +51,25 @@ fun SettingsDialog(
                 CopyFieldToggle("Protocols Seen", config.protocols) { config = config.copy(protocols = it); onConfigChange(config) }
                 CopyFieldToggle("Packet Count", config.packetCount) { config = config.copy(packetCount = it); onConfigChange(config) }
                 CopyFieldToggle("Timestamps", config.timestamps) { config = config.copy(timestamps = it); onConfigChange(config) }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Diagnostics",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Show log views", style = MaterialTheme.typography.bodyMedium)
+                    Switch(checked = showLogViews, onCheckedChange = onShowLogViewsChange)
+                }
 
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()

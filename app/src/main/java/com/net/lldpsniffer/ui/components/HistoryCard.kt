@@ -38,6 +38,7 @@ fun HistoryCard(
     onExportRecord: (MergedSwitchportRecord) -> Unit,
     onRenameRecord: (MergedSwitchportRecord) -> Unit,
     onDeleteRecord: (MergedSwitchportRecord) -> Unit,
+    onRecordClick: (MergedSwitchportRecord) -> Unit,
     copyFieldsConfig: CopyFieldsConfig = CopyFieldsConfig(),
     modifier: Modifier = Modifier
 ) {
@@ -109,6 +110,7 @@ fun HistoryCard(
                         items(records, key = { it.id }) { record ->
                             HistoryItemRow(
                                 record = record,
+                                onClick = { onRecordClick(record) },
                                 onCopy = { clipboardManager.setText(AnnotatedString(record.toDisplayText(copyFieldsConfig))) },
                                 onExport = { onExportRecord(record) },
                                 onRename = { onRenameRecord(record) },
@@ -125,6 +127,7 @@ fun HistoryCard(
 @Composable
 private fun HistoryItemRow(
     record: MergedSwitchportRecord,
+    onClick: () -> Unit,
     onCopy: () -> Unit,
     onExport: () -> Unit,
     onRename: () -> Unit,
@@ -138,6 +141,7 @@ private fun HistoryItemRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable(onClick = onClick)
                 .padding(8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically

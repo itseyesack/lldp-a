@@ -20,6 +20,7 @@ class SettingsStore(context: Context) {
         private const val KEY_PROTOCOLS = "copy_protocols"
         private const val KEY_PACKET_COUNT = "copy_packet_count"
         private const val KEY_TIMESTAMPS = "copy_timestamps"
+        private const val KEY_SHOW_LOG_VIEWS = "show_log_views"
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -59,5 +60,11 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_PACKET_COUNT, config.packetCount)
             .putBoolean(KEY_TIMESTAMPS, config.timestamps)
             .apply()
+    }
+
+    fun loadShowLogViews(): Boolean = prefs.getBoolean(KEY_SHOW_LOG_VIEWS, false)
+
+    fun saveShowLogViews(show: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_LOG_VIEWS, show).apply()
     }
 }
