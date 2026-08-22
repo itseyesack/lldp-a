@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Realtek RTL8153 (VID: 0x0BDA = 3034, PID: 0x8153 = 33107) -->
+    <usb-device vendor-id="3034" product-id="33107" />
+    
+    <!-- Realtek RTL8152 (VID: 0x0BDA = 3034, PID: 0x8152 = 33106) -->
+    <usb-device vendor-id="3034" product-id="33106" />
+
+    <!-- Realtek RTL8156 2.5G (VID: 0x0BDA = 3034, PID: 0x8156 = 33110) -->
+    <usb-device vendor-id="3034" product-id="33110" />
+
+    <!-- Catch any Realtek device by Vendor ID 3034 (0x0BDA) -->
+    <usb-device vendor-id="3034" />
+
+    <!-- Catch any ASIX device by Vendor ID 2965 (0x0B95) -->
+    <usb-device vendor-id="2965" />
+</resources>

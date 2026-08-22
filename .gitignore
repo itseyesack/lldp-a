@@ -1,0 +1,25 @@
+*.iml
+.gradle
+/.gradle-home
+/local.properties
+/.idea
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Signing
+keystore_base64.txt
+*.jks
+*.keystore
+*.p12
+
+# Vendored kernel reference material (not part of the app; kept local only)
+/reference
+
+# Ad-hoc diagnostic capture logs
+*.log
+l2_hardware_logs*.txt

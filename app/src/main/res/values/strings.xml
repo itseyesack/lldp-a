@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">lldp-a</string>
+    <string name="notification_channel_name">lldp-a Service</string>
+    <string name="notification_channel_desc">Background packet capture for LLDP and CDP frames</string>
+</resources>

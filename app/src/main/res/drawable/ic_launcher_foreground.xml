@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- RJ45 connector body -->
+    <path
+        android:pathData="M24,34 h36 v40 h-36 z"
+        android:fillColor="#ECEFF1" />
+
+    <!-- RJ45 retention clip tab -->
+    <path
+        android:pathData="M38,26 h12 v8 h-12 z"
+        android:fillColor="#ECEFF1" />
+
+    <!-- Contact pin slots -->
+    <path
+        android:pathData="M29,64 v8 M37,64 v8 M45,64 v8 M53,64 v8"
+        android:strokeColor="#10202C"
+        android:strokeWidth="3"
+        android:strokeLineCap="butt" />
+
+    <!-- Magnifying glass lens -->
+    <path
+        android:pathData="M70,42 m-13,0 a13,13 0 1,0 26,0 a13,13 0 1,0 -26,0"
+        android:strokeColor="#29B6F6"
+        android:strokeWidth="6"
+        android:fillColor="#00000000" />
+
+    <!-- Magnifying glass handle -->
+    <path
+        android:pathData="M79,51 L94,66"
+        android:strokeColor="#29B6F6"
+        android:strokeWidth="8"
+        android:strokeLineCap="round" />
+</vector>

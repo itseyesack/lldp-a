@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <rect x="0" y="0" width="108" height="108" fill="#10202C" />
+
+  <!-- RJ45 connector body -->
+  <rect x="24" y="34" width="36" height="40" fill="#ECEFF1" />
+
+  <!-- RJ45 retention clip tab -->
+  <rect x="38" y="26" width="12" height="8" fill="#ECEFF1" />
+
+  <!-- Contact pin slots -->
+  <g stroke="#10202C" stroke-width="3" stroke-linecap="butt">
+    <line x1="29" y1="64" x2="29" y2="72" />
+    <line x1="37" y1="64" x2="37" y2="72" />
+    <line x1="45" y1="64" x2="45" y2="72" />
+    <line x1="53" y1="64" x2="53" y2="72" />
+  </g>
+
+  <!-- Magnifying glass lens -->
+  <circle cx="70" cy="42" r="13" fill="none" stroke="#29B6F6" stroke-width="6" />
+
+  <!-- Magnifying glass handle -->
+  <line x1="79" y1="51" x2="94" y2="66" stroke="#29B6F6" stroke-width="8" stroke-linecap="round" />
+</svg>
