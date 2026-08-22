@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.net.lldpsniffer.usb.PeerDevice
+import com.net.lldpsniffer.vendor.MacVendorLookup
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -118,6 +119,12 @@ fun PeerDevicesCard(
 @Composable
 private fun PeerDeviceRow(peer: PeerDevice) {
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+    var vendor by remember(peer.mac) { mutableStateOf(MacVendorLookup.cachedLabel(peer.mac)) }
+    LaunchedEffect(peer.mac) {
+        if (vendor == null) {
+            vendor = MacVendorLookup.lookup(peer.mac)
+        }
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -131,7 +138,8 @@ private fun PeerDeviceRow(peer: PeerDevice) {
                 fontWeight = FontWeight.Medium
             )
             Text(
-                text = "${peer.ip ?: "IP unknown"} · ${peer.protocolLabel} · last seen ${timeFormat.format(Date(peer.lastSeen))}",
+                text = vendor?.let { "$it · " }.orEmpty() +
+                    "${peer.ip ?: "IP unknown"} · ${peer.protocolLabel} · last seen ${timeFormat.format(Date(peer.lastSeen))}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline
             )

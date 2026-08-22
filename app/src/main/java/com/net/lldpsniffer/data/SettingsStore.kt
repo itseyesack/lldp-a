@@ -33,6 +33,10 @@ class SettingsStore(context: Context) {
         private const val KEY_COPY_FIELDS_V2 = "copy_fields_v2_json"
         private const val KEY_COPY_FORMAT = "copy_format"
         private const val KEY_WEBHOOK_CONFIG = "webhook_config_json"
+        private const val KEY_HISTORY_LIMIT = "history_limit"
+
+        const val DEFAULT_HISTORY_LIMIT = 100
+        const val HISTORY_LIMIT_UNLIMITED = -1
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -157,5 +161,15 @@ class SettingsStore(context: Context) {
 
     fun saveShowLogViews(show: Boolean) {
         prefs.edit().putBoolean(KEY_SHOW_LOG_VIEWS, show).apply()
+    }
+
+    /** Returns [HISTORY_LIMIT_UNLIMITED] or a positive max record count. */
+    fun loadHistoryLimit(): Int {
+        val stored = prefs.getInt(KEY_HISTORY_LIMIT, DEFAULT_HISTORY_LIMIT)
+        return if (stored == HISTORY_LIMIT_UNLIMITED || stored >= 1) stored else DEFAULT_HISTORY_LIMIT
+    }
+
+    fun saveHistoryLimit(limit: Int) {
+        prefs.edit().putInt(KEY_HISTORY_LIMIT, limit).apply()
     }
 }

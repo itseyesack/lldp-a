@@ -31,11 +31,24 @@ device" instead of spinning indefinitely.
 Use the copy icon on the card to copy the current session's fields to the clipboard, or the
 pencil icon to name the record before it's saved to history.
 
+### Peer Devices
+
+The **Peer Devices** card lists every other MAC address seen on the link (sortable by last
+seen, first seen, or address). Each entry shows a best-effort vendor label, resolved via
+[maclookup.app](https://maclookup.app):
+
+- Broadcast, multicast (IPv4/IPv6, STP, LLDP, Cisco CDP/VTP/PAgP), and randomized/locally
+  administered addresses are labeled instantly, with no network lookup.
+- Everything else is looked up once per vendor OUI and cached on-device (so the same vendor is
+  never queried twice, even across app restarts), keeping requests well within the API's rate
+  limits.
+
 ## History
 
-Every completed session is kept in **History** (most recent first, latest 100 kept). Tap a
-record to see full details, or use the row actions to copy, export (share as JSON), rename, or
-delete it. **Export All** shares the full history as one JSON file.
+Every completed session is kept in **History**, most recent first, up to the limit configured in
+Settings → History (100 by default, or unlimited). Tap a record to see full details, or use the
+row actions to copy, export (share as JSON), rename, or delete it. **Export All** shares the full
+history as one JSON file.
 
 ## Settings
 
@@ -66,6 +79,14 @@ multiple phones share one webhook/channel) and optional auth header. See
 [WEBHOOK_TEMPLATES.md](WEBHOOK_TEMPLATES.md) for the full template system, placeholder reference,
 and Discord/generic-endpoint examples. Use **Send test webhook** to verify your configuration
 without waiting for a real capture session.
+
+### History
+
+Control how many sessions are kept:
+
+- **Keep all history (no limit)** — never drop old sessions automatically.
+- Otherwise, set **Max saved sessions** — once reached, the oldest sessions are dropped as new
+  ones are saved (default 100).
 
 ### Diagnostics
 

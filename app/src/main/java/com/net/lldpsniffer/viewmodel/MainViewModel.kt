@@ -22,6 +22,7 @@ import com.net.lldpsniffer.usb.AdapterInfo
 import com.net.lldpsniffer.usb.PeerDevice
 import com.net.lldpsniffer.usb.UsbConnectionState
 import com.net.lldpsniffer.usb.driver.LinkStatus
+import com.net.lldpsniffer.vendor.MacVendorLookup
 import com.net.lldpsniffer.webhook.WebhookSender
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -46,6 +47,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val recordStore = RecordStore(application)
     private val settingsStore = SettingsStore(application)
+
+    init {
+        MacVendorLookup.init(application)
+    }
 
     private val _service = MutableStateFlow<PacketSnifferService?>(null)
 
@@ -90,7 +95,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedPacket = MutableStateFlow<CapturedPacket?>(null)
     val selectedPacket: StateFlow<CapturedPacket?> = _selectedPacket.asStateFlow()
 
-    private val _history = MutableStateFlow(recordStore.load().take(100))
+    private val _historyLimit = MutableStateFlow(settingsStore.loadHistoryLimit())
+    val historyLimit: StateFlow<Int> = _historyLimit.asStateFlow()
+
+    private val _history = MutableStateFlow(applyHistoryLimit(recordStore.load(), _historyLimit.value))
     val history: StateFlow<List<MergedSwitchportRecord>> = _history.asStateFlow()
 
     private val _currentRecord = MutableStateFlow<MergedSwitchportRecord?>(null)
@@ -221,10 +229,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val finalized = record.copy(endTime = record.endTime ?: System.currentTimeMillis())
         _history.update { current ->
             val withoutDuplicate = current.filterNot { it.id == record.id }
-            (listOf(finalized) + withoutDuplicate).take(100)
+            applyHistoryLimit(listOf(finalized) + withoutDuplicate, _historyLimit.value)
         }
         recordStore.save(_history.value)
         sendSessionWebhook(finalized)
+    }
+
+    private fun applyHistoryLimit(records: List<MergedSwitchportRecord>, limit: Int): List<MergedSwitchportRecord> =
+        if (limit == SettingsStore.HISTORY_LIMIT_UNLIMITED) records else records.take(limit)
+
+    fun setHistoryLimit(limit: Int) {
+        _historyLimit.value = limit
+        settingsStore.saveHistoryLimit(limit)
+        _history.update { applyHistoryLimit(it, limit) }
+        recordStore.save(_history.value)
     }
 
     private fun sendSessionWebhook(record: MergedSwitchportRecord) {

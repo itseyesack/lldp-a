@@ -2,6 +2,7 @@ package com.net.lldpsniffer.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -12,7 +13,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.net.lldpsniffer.data.SettingsStore
 import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.WebhookConfig
 import com.net.lldpsniffer.ui.components.CopyFieldsSection
@@ -29,8 +32,12 @@ fun SettingsScreen(
     val copyFormat by viewModel.copyFormat.collectAsState()
     val webhookConfig by viewModel.webhookConfig.collectAsState()
     val showLogViews by viewModel.showLogViews.collectAsState()
+    val historyLimit by viewModel.historyLimit.collectAsState()
 
     var showClearConfirm by remember { mutableStateOf(false) }
+    var historyLimitInput by remember {
+        mutableStateOf(if (historyLimit == SettingsStore.HISTORY_LIMIT_UNLIMITED) "" else historyLimit.toString())
+    }
     var testResult by remember { mutableStateOf<WebhookSender.Result?>(null) }
     var testInFlight by remember { mutableStateOf(false) }
 
@@ -216,6 +223,63 @@ fun SettingsScreen(
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (result.success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "History",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Keep all history (no limit)", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = historyLimit == SettingsStore.HISTORY_LIMIT_UNLIMITED,
+                    onCheckedChange = { checked ->
+                        if (checked) {
+                            viewModel.setHistoryLimit(SettingsStore.HISTORY_LIMIT_UNLIMITED)
+                        } else {
+                            val restored = historyLimitInput.toIntOrNull()?.coerceAtLeast(1)
+                                ?: SettingsStore.DEFAULT_HISTORY_LIMIT
+                            historyLimitInput = restored.toString()
+                            viewModel.setHistoryLimit(restored)
+                        }
+                    }
+                )
+            }
+
+            if (historyLimit != SettingsStore.HISTORY_LIMIT_UNLIMITED) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = historyLimitInput,
+                    onValueChange = { text ->
+                        val digitsOnly = text.filter { it.isDigit() }
+                        historyLimitInput = digitsOnly
+                        digitsOnly.toIntOrNull()?.let { parsed ->
+                            if (parsed >= 1) viewModel.setHistoryLimit(parsed)
+                        }
+                    },
+                    label = { Text("Max saved sessions") },
+                    supportingText = { Text("Oldest sessions are dropped once this limit is reached.") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Every completed session is kept until you clear history manually.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
                 )
             }
 
