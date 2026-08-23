@@ -149,6 +149,30 @@ fun MergedSwitchportRecord.mergeWithPacket(packet: CapturedPacket): MergedSwitch
 fun MergedSwitchportRecord.isComplete(): Boolean =
     switchName != null && portId != null && chassisId != null && vlanId != null && managementIp != null
 
+/**
+ * True if [packet] independently reports an identity field (hostname/port/VLAN/management IP)
+ * that conflicts with what this record already has. mergeWithPacket() keeps the first value seen
+ * per field, so once a session is finalized it would otherwise silently ignore a real port/switch
+ * change instead of surfacing it - this is the signal callers use to split off a new session
+ * record instead of folding the new values into the old one.
+ */
+fun MergedSwitchportRecord.identityChangedBy(packet: CapturedPacket): Boolean {
+    val lldp = packet.lldpFrame
+    val cdp = packet.cdpFrame
+
+    fun differs(existing: String?, incoming: String?) = existing != null && incoming != null && existing != incoming
+
+    val incomingSwitchName = lldp?.systemName ?: cdp?.deviceId
+    val incomingPortId = lldp?.portId ?: cdp?.portId
+    val incomingVlanId = lldp?.vlanId ?: cdp?.nativeVlan
+    val incomingManagementIp = lldp?.managementAddress ?: cdp?.addresses?.firstOrNull()
+
+    return differs(switchName, incomingSwitchName) ||
+        differs(portId, incomingPortId) ||
+        differs(vlanId?.toString(), incomingVlanId?.toString()) ||
+        differs(managementIp, incomingManagementIp)
+}
+
 fun MergedSwitchportRecord.displayTitle(): String =
     name ?: "${switchName ?: "Unnamed"} · ${portId ?: "?"}"
 

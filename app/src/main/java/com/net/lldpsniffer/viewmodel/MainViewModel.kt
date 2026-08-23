@@ -14,6 +14,7 @@ import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.ProtocolType
 import com.net.lldpsniffer.model.WebhookConfig
+import com.net.lldpsniffer.model.identityChangedBy
 import com.net.lldpsniffer.model.isComplete
 import com.net.lldpsniffer.model.mergeWithPacket
 import com.net.lldpsniffer.model.toJson
@@ -209,10 +210,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun onPacketForRecord(packet: CapturedPacket) {
-        val sessionId = currentSessionId ?: return
+        var sessionId = currentSessionId ?: return
         if (packet.lldpFrame == null && packet.cdpFrame == null) return
 
-        val base = _currentRecord.value ?: MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
+        var base = _currentRecord.value ?: MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
+
+        // The link never went down, so nothing else would ever tell us the peer changed - if a
+        // finalized session's identity fields conflict with what this frame reports, the switch
+        // port was moved to a different port/switch without a physical detach. Split off a new
+        // session (fresh id/start time) seeded from this frame rather than folding a different
+        // device's data into the record that was already pushed to history/webhook.
+        if (sessionFinalizedThisSession && base.identityChangedBy(packet)) {
+            sessionId = UUID.randomUUID().toString()
+            currentSessionId = sessionId
+            sessionFinalizedThisSession = false
+            _currentRecordFinalized.value = false
+            base = MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
+        }
+
         val merged = base.mergeWithPacket(packet)
         _currentRecord.value = merged
         soloHostCheckJob?.cancel()
@@ -228,7 +243,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "capabilities=${merged.capabilities}, portDescription=${merged.portDescription}"
         )
 
-        if (!sessionFinalizedThisSession && merged.isComplete()) {
+        // Waiting for every core field to be known (isComplete()) is the general safety net,
+        // but some switches never populate all of them under either protocol. Once both LLDP
+        // and CDP have each contributed a frame, that's a definitive "nothing more is coming
+        // from the other protocol" signal on its own - finalize (and fire the webhook) right
+        // away instead of sitting on the session until link-down/disconnect.
+        if (!sessionFinalizedThisSession && (merged.isComplete() || (merged.hasLldp && merged.hasCdp))) {
             pushToHistory(merged)
             sessionFinalizedThisSession = true
             _currentRecordFinalized.value = true

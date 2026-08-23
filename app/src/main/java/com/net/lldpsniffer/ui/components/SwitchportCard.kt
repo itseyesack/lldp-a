@@ -2,8 +2,10 @@ package com.net.lldpsniffer.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lan
@@ -80,6 +82,10 @@ fun SwitchportCard(
                         if (info.hasCdp) {
                             Spacer(modifier = Modifier.width(4.dp))
                             ProtocolBadge(protocol = ProtocolType.CDP)
+                        }
+                        if (recordFinalized) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            FinalizedBadge()
                         }
                     }
                 }
@@ -265,6 +271,23 @@ fun InfoTile(
             fontFamily = FontFamily.Monospace,
             maxLines = if (singleLine) 1 else 3,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+fun FinalizedBadge() {
+    Box(
+        modifier = Modifier
+            .size(20.dp)
+            .background(color = Color(0xFF43A047), shape = CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = "Session complete",
+            tint = Color.White,
+            modifier = Modifier.size(14.dp)
         )
     }
 }
