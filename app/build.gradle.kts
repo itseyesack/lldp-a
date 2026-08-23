@@ -20,6 +20,10 @@ android {
         }
     }
 
+    // libusbreset.so (src/main/cpp/usb_reset.c) is prebuilt locally and checked into
+    // src/main/jniLibs rather than compiled here, so CI doesn't need an NDK/CMake toolchain.
+    // Rebuild it manually (NDK clang, one invocation per ABI) after editing usb_reset.c.
+
     signingConfigs {
         create("release") {
             val keystoreFile = file("release.jks")

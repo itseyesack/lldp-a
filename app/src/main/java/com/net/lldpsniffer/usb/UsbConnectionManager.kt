@@ -303,9 +303,11 @@ class UsbConnectionManager(private val context: Context) {
     }
 
     private suspend fun runCaptureSetup(device: UsbDevice, reconnectAttempt: Int = 0) {
+        var openedConnection: UsbDeviceConnection? = null
         try {
             val connection = usbManager.openDevice(device)
                 ?: throw IllegalStateException("usbManager.openDevice returned null. USB Host permission might be missing.")
+            openedConnection = connection
 
             activeConnection = connection
             activeVendorDriver = null
@@ -533,29 +535,49 @@ class UsbConnectionManager(private val context: Context) {
             // vendor-mode only.
             val connectionLost = runIngestionLoop(connection, epIn, activeVendorDriver)
 
-            if (connectionLost && activeDevice == device && reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
-                val nextAttempt = reconnectAttempt + 1
-                logDiag(
-                    "Connection to the adapter appears dead (no data or register access for a sustained " +
-                        "period, with no USB detach event) - reopening the device automatically " +
-                        "(attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)."
-                )
+            if (connectionLost) {
                 teardownForReconnect(connection)
-                _connectionState.value = UsbConnectionState.Connecting("Reconnecting to adapter (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)...")
-                delay(RECONNECT_DELAY_MS)
-                if (activeDevice == device) {
-                    runCaptureSetup(device, nextAttempt)
-                }
-            } else if (connectionLost) {
-                logDiag("ERROR: Automatic recovery exhausted after $reconnectAttempt attempt(s) - giving up until the adapter is unplugged and replugged.")
-                stopCapture()
+                scheduleReconnectOrGiveUp(
+                    device,
+                    reconnectAttempt,
+                    "Connection to the adapter appears dead (no data or register access for a sustained " +
+                        "period, with no USB detach event)"
+                )
             }
 
         } catch (e: Exception) {
-            logDiag("Error during USB capture setup: ${e.localizedMessage}")
-            _connectionState.value = UsbConnectionState.Error(
-                message = e.localizedMessage ?: "USB capture setup failed."
+            // A reopen can fail the exact same way the original connection died (hardware
+            // still wedged right after reopening, not merely a transient blip) - treating this
+            // identically to a mid-capture connection loss, rather than giving up on the first
+            // failed reopen, gives the device more chances to settle before we stop retrying.
+            openedConnection?.let { teardownForReconnect(it) }
+            scheduleReconnectOrGiveUp(
+                device,
+                reconnectAttempt,
+                "Error during USB capture setup: ${e.localizedMessage}"
             )
+        }
+    }
+
+    private suspend fun scheduleReconnectOrGiveUp(device: UsbDevice, reconnectAttempt: Int, reason: String) {
+        if (activeDevice != device) {
+            // Superseded by a manual stopCapture() or a different device taking over while this
+            // attempt was in flight - respect whatever state that already produced instead of
+            // clobbering it with a stale Error/Connecting update for a device we no longer own.
+            return
+        }
+        if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+            val nextAttempt = reconnectAttempt + 1
+            logDiag("$reason - reopening the device automatically (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS).")
+            _connectionState.value = UsbConnectionState.Connecting("Reconnecting to adapter (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)...")
+            delay(RECONNECT_DELAY_MS)
+            if (activeDevice == device) {
+                runCaptureSetup(device, nextAttempt)
+            }
+        } else {
+            logDiag("ERROR: Automatic recovery exhausted after $reconnectAttempt attempt(s) - giving up until the adapter is unplugged and replugged. $reason")
+            clearConnectionResources()
+            _connectionState.value = UsbConnectionState.Error(message = reason)
         }
     }
 
@@ -696,6 +718,15 @@ class UsbConnectionManager(private val context: Context) {
      * same UsbDevice and rebuild everything from scratch as an automatic recovery attempt.
      */
     private fun teardownForReconnect(connection: UsbDeviceConnection) {
+        // A plain close()+reopen() was observed on hardware to be insufficient - the reopened
+        // connection immediately failed every register write, meaning the chip itself was still
+        // wedged rather than merely the app's handle to it. A real port-level reset (equivalent
+        // to a physical unplug/replug) gives the upcoming reopen an actual chance to succeed.
+        val resetOk = UsbBusReset.reset(connection)
+        logDiag(
+            if (resetOk) "Issued a USB port reset before reopening."
+            else "USB port reset unavailable or failed - falling back to a plain close+reopen."
+        )
         synchronized(this) {
             for (iface in claimedInterfaces) {
                 try {
@@ -719,12 +750,19 @@ class UsbConnectionManager(private val context: Context) {
 
     fun stopCapture() {
         Log.i(TAG, "Stopping USB packet capture...")
-        // startCapture() mutates this same state under synchronized(this); without the same
-        // lock here, a fast unplug/replug (DETACHED->stopCapture, ATTACHED->startCapture in
-        // quick succession) could interleave the two, e.g. this call nulling out
-        // activeConnection/claimedInterfaces out from under a startCapture() that just claimed
-        // them - leaving the ingestion loop's `activeConnection == connection` guard checking a
-        // connection that was swapped or closed underneath it.
+        clearConnectionResources()
+        _connectionState.value = UsbConnectionState.Disconnected
+    }
+
+    // startCapture() mutates this same state under synchronized(this); without the same
+    // lock here, a fast unplug/replug (DETACHED->stopCapture, ATTACHED->startCapture in
+    // quick succession) could interleave the two, e.g. this call nulling out
+    // activeConnection/claimedInterfaces out from under a startCapture() that just claimed
+    // them - leaving the ingestion loop's `activeConnection == connection` guard checking a
+    // connection that was swapped or closed underneath it. Callers set _connectionState
+    // themselves afterward (Disconnected for a user-facing stop, Error when automatic
+    // recovery gives up) since that differs by caller.
+    private fun clearConnectionResources() {
         synchronized(this) {
             captureJob?.cancel()
             captureJob = null
@@ -753,7 +791,6 @@ class UsbConnectionManager(private val context: Context) {
         _adapterInfo.value = null
         peerDevicesByMac.clear()
         _peerDevices.value = emptyList()
-        _connectionState.value = UsbConnectionState.Disconnected
     }
 
     fun updateState(newState: UsbConnectionState) {
