@@ -572,7 +572,15 @@ class UsbConnectionManager(private val context: Context) {
             _connectionState.value = UsbConnectionState.Connecting("Reconnecting to adapter (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)...")
             delay(RECONNECT_DELAY_MS)
             if (activeDevice == device) {
-                runCaptureSetup(device, nextAttempt)
+                // The device can genuinely re-enumerate as a new UsbDevice object between
+                // attempts - observed on hardware as USBDEVFS_RESET itself failing with ENODEV
+                // even though the cable stayed plugged in, meaning the kernel had already torn
+                // the old device node down. Reusing the stale object then makes every
+                // openDevice() call return null forever, since Android no longer recognizes that
+                // specific instance as attached even once a fresh one is back on the bus.
+                val freshDevice = findSupportedDevice() ?: device
+                activeDevice = freshDevice
+                runCaptureSetup(freshDevice, nextAttempt)
             }
         } else {
             logDiag("ERROR: Automatic recovery exhausted after $reconnectAttempt attempt(s) - giving up until the adapter is unplugged and replugged. $reason")
