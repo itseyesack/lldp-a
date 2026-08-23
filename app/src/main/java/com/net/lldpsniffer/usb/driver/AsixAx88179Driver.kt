@@ -158,7 +158,7 @@ class AsixAx88179Driver : VendorAdapterDriver {
      * autonegotiation. LED/EEE/monitor-mode steps are cosmetic/WoL-only and are skipped -
      * they don't affect whether frames reach the host.
      */
-    override fun bringUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
+    override fun bringUp(device: UsbDevice, connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
         var criticalFailures = 0
 
         logDiag("Configuring AX88179 Vendor Registers...")

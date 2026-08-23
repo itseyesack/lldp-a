@@ -30,8 +30,12 @@ interface VendorAdapterDriver {
      * Runs the vendor register sequence needed to start the RX path. Returns false if a
      * load-bearing register write failed (device likely still owned by the kernel driver,
      * or the wrong configuration is active).
+     *
+     * [device] is passed alongside the connection because one driver can cover several PIDs
+     * whose bring-up sequences diverge upstream (see RealtekRtl8153Driver), and the USB host
+     * API offers no way back to the UsbDevice from a UsbDeviceConnection.
      */
-    fun bringUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean
+    fun bringUp(device: UsbDevice, connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean
 
     /**
      * Unblocks the chip's RX path, called immediately before the bulk IN read loop starts.

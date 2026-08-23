@@ -204,7 +204,7 @@ class AsixAx88772Driver : VendorAdapterDriver {
      * host. MAC address rewrite is also skipped: this is a passive receive-only sniffer,
      * so the device's outgoing source MAC is irrelevant.
      */
-    override fun bringUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
+    override fun bringUp(device: UsbDevice, connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
         var criticalFailures = 0
 
         logDiag("Configuring AX88772 Vendor Registers...")

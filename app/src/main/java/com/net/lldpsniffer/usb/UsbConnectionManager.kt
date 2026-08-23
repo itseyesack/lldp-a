@@ -473,7 +473,7 @@ class UsbConnectionManager(private val context: Context) {
                     activeVendorDriver = matchedDriver
                     if (matchedDriver != null) {
                         logDiag("Matched vendor adapter driver: ${matchedDriver.name}")
-                        vendorRxConfirmed = matchedDriver.bringUp(connection, ::logDiag)
+                        vendorRxConfirmed = matchedDriver.bringUp(device, connection, ::logDiag)
                         val initialStatus = matchedDriver.readLinkStatusLogged(connection, "Initial link status read")
                         _linkStatus.value = initialStatus
                         _linkState.value = initialStatus?.up

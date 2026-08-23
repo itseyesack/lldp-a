@@ -54,6 +54,14 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         private const val RXFIFO_THR2_NORMAL = 0x00A0
         private const val RXFIFO_THR3_NORMAL = 0x0110
         private const val TXFIFO_THR_NORMAL2 = 0x01000008L
+
+        // RTL8156-only share-FIFO tuning (kernel rtl8156_up), in place of the RXFIFO_CTRL*
+        // triple the 8152/8153 paths use.
+        private const val PLA_RXFIFO_FULL = 0xC0A2
+        private const val RXFIFO_FULL_MASK = 0x0FFF
+        private const val RXFIFO_FULL_8156 = 0x08
+        private const val USB_RX_BUF_TH = 0xD40C
+        private const val RX_BUF_TH_8156 = 0x00600400L
         private const val CRWECR_CONFIG = 0xC0
         private const val CRWECR_NORMAL = 0x00
         private const val RCR_ACCEPT_ALL = 0x0000000F
@@ -114,6 +122,9 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
     // space rather than the PLA/MAC space - same OCP protocol, different wIndex MCU type.
     private fun writeUsbByte(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Int) =
         ocpWrite(connection, logDiag, MCU_TYPE_USB, reg, 0x11, 3, value.toLong() and 0xFF)
+
+    private fun writeUsbDword(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Long) =
+        ocpWrite(connection, logDiag, MCU_TYPE_USB, reg, 0xFF, 0, value and 0xFFFFFFFFL)
 
     private fun readUsbByte(connection: UsbDeviceConnection, reg: Int): Int? {
         val dword = readOcpAlignedDword(connection, MCU_TYPE_USB, reg) ?: return null
@@ -393,8 +404,14 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
      * RE_INIT_LL rebuilds it, and it can only be issued once NOW_IS_OOB and MCU_BORW_EN are
      * cleared. Note the chip stays in OOB across a replug, since the MCU keeps running - which
      * is why unplugging the adapter repeatedly could fail many times in a row.
+     *
+     * [is8156] selects the 2.5GbE variant's handover, which upstream (rtl8156_up) stops short
+     * of the link-list rebuild: BMU reset and the two OOB bits, then nothing. Issuing
+     * RE_INIT_LL there anyway would mean waiting out two LINK_LIST_READY polls the chip may
+     * never satisfy, so the split follows the kernel rather than assuming the 8153 sequence
+     * generalises.
      */
-    private fun rtlExitOob(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
+    private fun rtlExitOob(connection: UsbDeviceConnection, logDiag: (String) -> Unit, is8156: Boolean) {
         // rtl_reset_bmu(): toggle the USB-side bulk IN/OUT DMA engines off and back on. Note
         // this one lives in USB register space, not PLA. Unconditional in the kernel for every
         // chip version, unlike the endpoint poking inside rtl8152_nic_reset.
@@ -419,18 +436,23 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
 
         val sffBefore = readPlaWord(connection, PLA_SFF_STS_7)
         if (sffBefore != null) writePlaWord(connection, logDiag, PLA_SFF_STS_7, sffBefore and MCU_BORW_EN.inv())
-        val readyAfterBorw = waitOobLinkListReady(connection)
 
+        val wasOob = oobBefore?.let { (it and NOW_IS_OOB) != 0 }
+        val stillOob = oobAfter?.let { (it and NOW_IS_OOB) != 0 }
+        val common = "PLA_OOB_CTRL ${hex(oobBefore, 2)}->${hex(oobAfter, 2)} (nowIsOob $wasOob->$stillOob) " +
+            "PLA_SFF_STS_7 ${hex(sffBefore, 4)}"
+
+        if (is8156) {
+            logDiag("RTL8153 exit-OOB (8156 variant, no link-list rebuild): $common")
+            return
+        }
+
+        val readyAfterBorw = waitOobLinkListReady(connection)
         val sffForReinit = readPlaWord(connection, PLA_SFF_STS_7)
         if (sffForReinit != null) writePlaWord(connection, logDiag, PLA_SFF_STS_7, sffForReinit or RE_INIT_LL)
         val readyAfterReinit = waitOobLinkListReady(connection)
 
-        val wasOob = oobBefore?.let { (it and NOW_IS_OOB) != 0 }
-        val stillOob = oobAfter?.let { (it and NOW_IS_OOB) != 0 }
-        logDiag(
-            "RTL8153 exit-OOB: PLA_OOB_CTRL ${hex(oobBefore, 2)}->${hex(oobAfter, 2)} (nowIsOob $wasOob->$stillOob) " +
-                "PLA_SFF_STS_7 ${hex(sffBefore, 4)} linkListReady(afterBorw=$readyAfterBorw, afterReInit=$readyAfterReinit)"
-        )
+        logDiag("RTL8153 exit-OOB: $common linkListReady(afterBorw=$readyAfterBorw, afterReInit=$readyAfterReinit)")
     }
 
     /**
@@ -438,8 +460,25 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
      * the new FIFO mode takes effect, then program the RX/TX share-FIFO credit thresholds. The
      * chip powers up with OOB-appropriate thresholds; the host-mode values are what the kernel
      * always writes before the bulk pipe is used.
+     *
+     * The 2.5GbE part tunes an entirely different set of registers here (rtl8156_up: a masked
+     * field in PLA_RXFIFO_FULL plus the USB-side RX buffer threshold, and no auto-FIFO or
+     * second reset at all), so it gets its own branch rather than having 8153 addresses
+     * written at it. Power-management steps rtl8156_up also performs - U1/U2, U2P3, ALDPS,
+     * MCU speed-down, WoL restore - stay unreplicated, the same scope this driver already
+     * draws for the 8153 path.
      */
-    private fun rtlInitFifo(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
+    private fun rtlInitFifo(connection: UsbDeviceConnection, logDiag: (String) -> Unit, is8156: Boolean) {
+        if (is8156) {
+            val rxFifoFull = readPlaWord(connection, PLA_RXFIFO_FULL)
+            if (rxFifoFull != null) {
+                writePlaWord(connection, logDiag, PLA_RXFIFO_FULL, (rxFifoFull and RXFIFO_FULL_MASK.inv()) or RXFIFO_FULL_8156)
+            }
+            writeUsbDword(connection, logDiag, USB_RX_BUF_TH, RX_BUF_TH_8156)
+            logDiag("RTL8153 FIFO init (8156 variant): PLA_RXFIFO_FULL ${hex(rxFifoFull, 4)}, USB_RX_BUF_TH written")
+            return
+        }
+
         val tcr0 = readPlaWord(connection, PLA_TCR0)
         if (tcr0 != null) writePlaWord(connection, logDiag, PLA_TCR0, tcr0 or TCR0_AUTO_FIFO)
         nicReset(connection, logDiag, "post-auto-fifo")
@@ -459,8 +498,13 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
      * reset, RCR, CR) all reported success, so the caller can tell "hardware not accepting
      * commands" apart from "hardware configured, just no traffic yet".
      */
-    override fun bringUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
+    override fun bringUp(device: UsbDevice, connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
         var criticalFailures = 0
+
+        // Upstream splits the OOB handover and FIFO tuning by chip family (r8153_first_init /
+        // r8152b_exit_oob take one shape, rtl8156_up another); the 8152 and 8153 sequences are
+        // near-identical, so only the 2.5GbE part needs branching. See rtlExitOob/rtlInitFifo.
+        val is8156 = device.productId == RTL8156_PID
 
         logDiag("Configuring RTL8153 Vendor Registers (with Linux r8152 byte-enables)...")
 
@@ -485,7 +529,7 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         // 2.5. Take the RX path away from the chip's own MCU and rebuild the RX FIFO link
         // list for host ownership - see rtlExitOob, this is the stage whose absence let a
         // fully-verified bring-up still deliver zero packets.
-        rtlExitOob(connection, logDiag)
+        rtlExitOob(connection, logDiag, is8156)
 
         // 3. Set Rx Max Packet Size (PLA_RMS) to 1536 bytes.
         val rmsOk = writeVerifyWord(connection, logDiag, PLA_RMS, 1536, "RTL8153 PLA_RMS (1536B)")
@@ -493,7 +537,7 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
 
         // 3.5. Auto-FIFO mode plus host-mode FIFO thresholds. Ordered after PLA_RMS to match
         // the kernel, whose second MAC reset in here doesn't disturb the RMS just written.
-        rtlInitFifo(connection, logDiag)
+        rtlInitFifo(connection, logDiag, is8156)
 
         // 4. Set Multicast Hash Table (PLA_MAR, 8 bytes) to accept all multicast.
         val mar0Ok = writeVerifyDword(connection, logDiag, PLA_MAR, 0xFFFFFFFFL, "RTL8153 PLA_MAR0")
