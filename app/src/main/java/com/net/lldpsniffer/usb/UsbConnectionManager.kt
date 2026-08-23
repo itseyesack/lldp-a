@@ -623,27 +623,35 @@ class UsbConnectionManager(private val context: Context) {
 
     fun stopCapture() {
         Log.i(TAG, "Stopping USB packet capture...")
-        captureJob?.cancel()
-        captureJob = null
+        // startCapture() mutates this same state under synchronized(this); without the same
+        // lock here, a fast unplug/replug (DETACHED->stopCapture, ATTACHED->startCapture in
+        // quick succession) could interleave the two, e.g. this call nulling out
+        // activeConnection/claimedInterfaces out from under a startCapture() that just claimed
+        // them - leaving the ingestion loop's `activeConnection == connection` guard checking a
+        // connection that was swapped or closed underneath it.
+        synchronized(this) {
+            captureJob?.cancel()
+            captureJob = null
 
-        activeConnection?.let { conn ->
-            for (iface in claimedInterfaces) {
+            activeConnection?.let { conn ->
+                for (iface in claimedInterfaces) {
+                    try {
+                        conn.releaseInterface(iface)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error releasing interface ${iface.id}", e)
+                    }
+                }
                 try {
-                    conn.releaseInterface(iface)
+                    conn.close()
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error releasing interface ${iface.id}", e)
+                    Log.e(TAG, "Error closing UsbDeviceConnection", e)
                 }
             }
-            try {
-                conn.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing UsbDeviceConnection", e)
-            }
+            claimedInterfaces.clear()
+            activeConnection = null
+            activeDevice = null
+            activeVendorDriver = null
         }
-        claimedInterfaces.clear()
-        activeConnection = null
-        activeDevice = null
-        activeVendorDriver = null
         _linkState.value = null
         _linkStatus.value = null
         _adapterInfo.value = null

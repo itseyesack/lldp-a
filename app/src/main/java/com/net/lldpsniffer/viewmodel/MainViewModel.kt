@@ -129,6 +129,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var packetCollectionJob: Job? = null
     private var linkStateCollectionJob: Job? = null
+    private var connectionStateCollectionJob: Job? = null
 
     fun bindService(service: PacketSnifferService) {
         _service.value = service
@@ -156,6 +157,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         linkStateCollectionJob = viewModelScope.launch {
             service.linkState.collect { onLinkStateChanged(it) }
         }
+
+        connectionStateCollectionJob?.cancel()
+        connectionStateCollectionJob = viewModelScope.launch {
+            service.connectionState.collect { state ->
+                if (state is UsbConnectionState.Disconnected) onDeviceFullyDisconnected()
+            }
+        }
     }
 
     fun unbindService() {
@@ -163,6 +171,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         packetCollectionJob = null
         linkStateCollectionJob?.cancel()
         linkStateCollectionJob = null
+        connectionStateCollectionJob?.cancel()
+        connectionStateCollectionJob = null
         _service.value = null
     }
 
@@ -256,6 +266,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 logSink?.logDiag("Webhook send failed: ${result.errorMessage}")
             }
+        }
+    }
+
+    /**
+     * A full USB detach is an unambiguous end of the session - unlike a live link-down (which
+     * could just be a brief renegotiation and is given a 5s debounce, see [onLinkStateChanged]),
+     * there is no "it might come back" case here. Finalizing (and sending the webhook for)
+     * whatever was captured immediately, rather than waiting on that debounce, avoids losing
+     * the session and its webhook if the app is closed before the debounce fires.
+     */
+    private fun onDeviceFullyDisconnected() {
+        linkDownDebounceJob?.cancel()
+        linkDownDebounceJob = null
+        if (currentSessionId != null) {
+            finalizeSession()
         }
     }
 

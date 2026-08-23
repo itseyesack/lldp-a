@@ -51,7 +51,6 @@ fun MainScreen(
     val filteredPackets by viewModel.filteredPackets.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
     val selectedPacket by viewModel.selectedPacket.collectAsState()
-    val diagnosticLogs by viewModel.diagnosticLogs.collectAsState()
     val copyFieldsConfig by viewModel.copyFieldsConfig.collectAsState()
     val copyFormat by viewModel.copyFormat.collectAsState()
     val showLogViews by viewModel.showLogViews.collectAsState()
@@ -156,7 +155,7 @@ fun MainScreen(
             if (showLogViews) {
                 // Live Hardware Log Console
                 DiagnosticLogsCard(
-                    logs = diagnosticLogs,
+                    logs = viewModel.diagnosticLogs,
                     onExportLogs = {
                         val uri = viewModel.exportHardwareLogs(context)
                         if (uri != null) {

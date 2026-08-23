@@ -19,15 +19,22 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.StateFlow
 
 @Composable
 fun DiagnosticLogsCard(
-    logs: List<String>,
+    logs: StateFlow<List<String>>,
     onExportLogs: () -> Unit,
     onClearLogs: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
+    // Collected here rather than hoisted up into MainScreen: during an active capture this
+    // can update dozens of times per second (raw hex dump + per-field dumps per packet), and
+    // collecting it at the MainScreen level forced the ENTIRE screen (history, peers, packet
+    // log, etc.) to recompose on every single log line - a real ANR risk during bursts.
+    // Scoping the collection to just this card limits that recomposition to the log list.
+    val logList by logs.collectAsState()
 
     Card(
         modifier = modifier
@@ -53,7 +60,7 @@ fun DiagnosticLogsCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Live Hardware Logs (${logs.size})",
+                        text = "Live Hardware Logs (${logList.size})",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -91,7 +98,7 @@ fun DiagnosticLogsCard(
                         .background(Color(0xFF121212), shape = RoundedCornerShape(8.dp))
                         .padding(8.dp)
                 ) {
-                    if (logs.isEmpty()) {
+                    if (logList.isEmpty()) {
                         Text(
                             text = "No diagnostic events logged yet.",
                             color = Color.Gray,
@@ -103,7 +110,7 @@ fun DiagnosticLogsCard(
                             modifier = Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            items(logs) { logMsg ->
+                            items(logList) { logMsg ->
                                 Text(
                                     text = logMsg,
                                     modifier = Modifier.fillMaxWidth(),
