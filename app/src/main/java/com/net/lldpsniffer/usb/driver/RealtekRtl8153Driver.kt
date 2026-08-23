@@ -98,6 +98,19 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         return if (n > 0) buf[0].toInt() and 0xFF else null
     }
 
+    private fun readPlaWord(connection: UsbDeviceConnection, reg: Int): Int? {
+        val buf = ByteArray(2)
+        val lane = reg and 2
+        val byteEn = (0x33 shl lane) and 0xFF
+        val n = connection.controlTransfer(
+            REQUEST_TYPE_VENDOR_IN, VENDOR_REQ_GET_REGS,
+            reg and 0xFFFC.toInt(), MCU_TYPE_PLA or byteEn,
+            buf, 2, 1000
+        )
+        if (n <= 0) return null
+        return (buf[0].toInt() and 0xFF) or ((buf[1].toInt() and 0xFF) shl 8)
+    }
+
     private fun readPlaDword(connection: UsbDeviceConnection, reg: Int): Long? {
         val buf = ByteArray(4)
         val n = connection.controlTransfer(
@@ -136,6 +149,76 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         return LinkStatus(up = linkUp, speedMbps = speedMbps, duplex = duplex)
     }
 
+    // The four helpers below all follow the same shape: write, read the register back, and
+    // only report success if the readback actually matches what was written - a successful
+    // controlTransfer only proves the USB host controller ACK'd the OUT packet, not that the
+    // target MCU decoded and applied it. A transient miss (e.g. right as the chip is still
+    // settling after the MAC reset) can succeed a moment later, so each retries a few times
+    // before being treated as a real hardware fault.
+
+    private fun writeVerifyByte(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Int, label: String, maxAttempts: Int = 3): Boolean {
+        val target = value and 0xFF
+        for (attempt in 1..maxAttempts) {
+            val res = writePlaByte(connection, logDiag, reg, target)
+            val readback = readPlaByte(connection, reg)
+            val ok = res >= 0 && readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} target=0x${String.format("%02X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
+    private fun writeVerifyWord(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Int, label: String, maxAttempts: Int = 3): Boolean {
+        val target = value and 0xFFFF
+        for (attempt in 1..maxAttempts) {
+            val res = writePlaWord(connection, logDiag, reg, target)
+            val readback = readPlaWord(connection, reg)
+            val ok = res >= 0 && readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%04X", it) } ?: "read failed"} target=0x${String.format("%04X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
+    private fun writeVerifyDword(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Long, label: String, maxAttempts: Int = 3): Boolean {
+        val target = value and 0xFFFFFFFFL
+        for (attempt in 1..maxAttempts) {
+            val res = writePlaDword(connection, logDiag, reg, target)
+            val readback = readPlaDword(connection, reg)
+            val ok = res >= 0 && readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=0x${readback?.let { String.format("%08X", it) } ?: "read failed"} target=0x${String.format("%08X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
+    /**
+     * Read-modify-write a byte register (matching the kernel's ocp_byte_set_bits/clear_bits):
+     * re-reads the current value on every attempt rather than reusing one snapshot, so a bit
+     * that another retry already managed to land isn't clobbered back off by this one.
+     */
+    private fun writeVerifyBits(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, setMask: Int, clearMask: Int, label: String, maxAttempts: Int = 3): Boolean {
+        for (attempt in 1..maxAttempts) {
+            val current = readPlaByte(connection, reg)
+            if (current == null) {
+                logDiag("$label (attempt $attempt/$maxAttempts): pre-read failed")
+                if (attempt < maxAttempts) Thread.sleep(10)
+                continue
+            }
+            val target = (current and clearMask.inv()) or setMask
+            val res = writePlaByte(connection, logDiag, reg, target)
+            val readback = readPlaByte(connection, reg)
+            val ok = res >= 0 && readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): current=0x${String.format("%02X", current)} write=$res readback=${readback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} target=0x${String.format("%02X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
     /**
      * Byte-enable protocol (Linux r8152.c generic_ocp_write): unaligned writes always send a
      * 4-byte transfer with the value shifted into the lane selected by byte_en, not a short
@@ -150,10 +233,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
 
         logDiag("Configuring RTL8153 Vendor Registers (with Linux r8152 byte-enables)...")
 
-        // 1. Unlock config-locked registers before touching RCR/CR/RMS/MAR.
-        val unlock = writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG)
-        logDiag("RTL8153 PLA_CRWECR unlock: $unlock")
-        if (unlock < 0) criticalFailures++
+        // 1. Unlock config-locked registers before touching RCR/CR/RMS/MAR. If this doesn't
+        // actually latch, every locked-register write below will predictably fail its own
+        // verification too - counted here as well since it's the earliest point the whole
+        // sequence can go wrong.
+        val unlocked = writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG, "RTL8153 PLA_CRWECR unlock")
+        if (!unlocked) criticalFailures++
 
         // 2. Reset the MAC (PLA_CR bit RST) and poll until the device clears it.
         val resetIssued = writePlaByte(connection, logDiag, PLA_CR, CR_RST)
@@ -162,68 +247,58 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
             criticalFailures++
         } else {
             var resetCleared = false
-            val readBuf = ByteArray(1)
             for (attempt in 1..20) {
-                val read = connection.controlTransfer(
-                    REQUEST_TYPE_VENDOR_IN, VENDOR_REQ_GET_REGS,
-                    PLA_CR and 0xFFFC.toInt(), MCU_TYPE_PLA or (0x11 shl (PLA_CR and 3)),
-                    readBuf, 1, 1000
-                )
-                if (read > 0 && (readBuf[0].toInt() and CR_RST) == 0) {
+                val read = readPlaByte(connection, PLA_CR)
+                if (read != null && (read and CR_RST) == 0) {
                     resetCleared = true
                     break
                 }
                 Thread.sleep(10)
             }
             logDiag("RTL8153 MAC reset cleared: $resetCleared")
+            if (!resetCleared) criticalFailures++
         }
 
         // 3. Set Rx Max Packet Size (PLA_RMS) to 1536 bytes.
-        val rmsRes = writePlaWord(connection, logDiag, PLA_RMS, 1536)
-        logDiag("RTL8153 PLA_RMS (1536B): $rmsRes")
+        val rmsOk = writeVerifyWord(connection, logDiag, PLA_RMS, 1536, "RTL8153 PLA_RMS (1536B)")
+        if (!rmsOk) criticalFailures++
 
         // 4. Set Multicast Hash Table (PLA_MAR, 8 bytes) to accept all multicast.
-        val mar0 = writePlaDword(connection, logDiag, PLA_MAR, 0xFFFFFFFFL)
-        val mar4 = writePlaDword(connection, logDiag, PLA_MAR + 4, 0xFFFFFFFFL)
-        logDiag("RTL8153 Multicast Hash Table (MAR0-7 0xFF): MAR0=$mar0, MAR4=$mar4")
+        val mar0Ok = writeVerifyDword(connection, logDiag, PLA_MAR, 0xFFFFFFFFL, "RTL8153 PLA_MAR0")
+        val mar4Ok = writeVerifyDword(connection, logDiag, PLA_MAR + 4, 0xFFFFFFFFL, "RTL8153 PLA_MAR4")
+        if (!mar0Ok || !mar4Ok) criticalFailures++
 
         // 5. Configure PLA_RCR: AAP|APM|AM|AB = accept everything (promiscuous sniffing).
-        val rcrRes = writePlaDword(connection, logDiag, PLA_RCR, RCR_ACCEPT_ALL.toLong())
-        // Read back the register we just wrote instead of trusting the transfer's return
-        // code (a successful controlTransfer only proves the USB host controller ACK'd the
-        // OUT packet, not that the chip's MCU actually decoded and applied it) - several
-        // prior fixes assumed "transfer succeeded" == "register took effect" and were wrong.
-        val rcrReadback = readPlaDword(connection, PLA_RCR)
-        logDiag("RTL8153 PLA_RCR (accept-all 0x0F): write=$rcrRes readback=0x${rcrReadback?.let { String.format("%08X", it) } ?: "read failed"}")
-        if (rcrRes < 0) criticalFailures++
+        // Verified via readback instead of trusting the transfer's return code - a successful
+        // controlTransfer only proves the USB host controller ACK'd the OUT packet, not that
+        // the chip's MCU actually decoded and applied it. Several prior fixes assumed
+        // "transfer succeeded" == "register took effect" and were wrong.
+        val rcrOk = writeVerifyDword(connection, logDiag, PLA_RCR, RCR_ACCEPT_ALL.toLong(), "RTL8153 PLA_RCR (accept-all 0x0F)")
+        if (!rcrOk) criticalFailures++
 
         // 5.5. Reset the RX packet filter (PLA_FMC FCR_MCU_EN off/on), matching the kernel's
         // rtl_enable(): r8152b_reset_packet_filter() runs immediately before RE/TE are set.
-        val fmcBefore = readPlaByte(connection, PLA_FMC)
-        val fmcCleared = fmcBefore?.let { writePlaByte(connection, logDiag, PLA_FMC, it and FMC_FCR_MCU_EN.inv()) } ?: -1
-        val fmcSet = fmcBefore?.let { writePlaByte(connection, logDiag, PLA_FMC, it or FMC_FCR_MCU_EN) } ?: -1
-        logDiag("RTL8153 PLA_FMC packet-filter reset (clear=$fmcCleared, set=$fmcSet)")
+        val fmcClearOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = 0, clearMask = FMC_FCR_MCU_EN, label = "RTL8153 PLA_FMC clear FCR_MCU_EN")
+        val fmcSetOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = FMC_FCR_MCU_EN, clearMask = 0, label = "RTL8153 PLA_FMC set FCR_MCU_EN")
+        if (!fmcClearOk || !fmcSetOk) criticalFailures++
 
         // 6. Enable RX and TX in the Command Register: TE|RE. Read-modify-write, matching
         // the kernel's ocp_byte_set_bits() - a blind overwrite clobbers whatever other bits
         // the chip had already set in CR.
-        val crBefore = readPlaByte(connection, PLA_CR) ?: 0
-        val crRes = writePlaByte(connection, logDiag, PLA_CR, crBefore or CR_TE or CR_RE)
-        val crReadback = readPlaByte(connection, PLA_CR)
-        logDiag("RTL8153 PLA_CR (Rx/Tx Enable, RMW from 0x${String.format("%02X", crBefore)}): write=$crRes readback=0x${crReadback?.let { String.format("%02X", it) } ?: "read failed"}")
-        if (crRes < 0) criticalFailures++
+        val crOk = writeVerifyBits(connection, logDiag, PLA_CR, setMask = CR_TE or CR_RE, clearMask = 0, label = "RTL8153 PLA_CR (Rx/Tx Enable)")
+        if (!crOk) criticalFailures++
 
         // 6.5. Clear RXDY_GATED_EN in PLA_MISC_1. The kernel's rtl_enable() always clears
         // this as the final step before traffic flows - when set, it gates (blocks) the
         // RX-ready signal at the FIFO, so the MAC can look fully RX-enabled with link up
         // and still deliver zero bytes to the host.
-        val miscBefore = readPlaByte(connection, PLA_MISC_1)
-        val rxdyGateRes = miscBefore?.let { writePlaByte(connection, logDiag, PLA_MISC_1, it and RXDY_GATED_EN.inv()) } ?: -1
-        logDiag("RTL8153 PLA_MISC_1 RXDY_GATED_EN clear (was 0x${miscBefore?.let { String.format("%02X", it) } ?: "read failed"}): $rxdyGateRes")
+        val rxdyGateOk = writeVerifyBits(connection, logDiag, PLA_MISC_1, setMask = 0, clearMask = RXDY_GATED_EN, label = "RTL8153 PLA_MISC_1 RXDY_GATED_EN clear")
+        if (!rxdyGateOk) criticalFailures++
 
-        // 7. Re-lock config registers.
-        val lock = writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL)
-        logDiag("RTL8153 PLA_CRWECR lock: $lock")
+        // 7. Re-lock config registers. Verified for visibility, but not counted as a
+        // critical failure - by this point RX/TX are already enabled, so failing to re-lock
+        // doesn't stop traffic, it only leaves config-write-enable on longer than intended.
+        writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL, "RTL8153 PLA_CRWECR lock")
 
         // 8. Poll PHY Link Status for a few seconds instead of a single immediate read.
         // A one-shot check right after the MAC reset above previously misreported a
@@ -262,18 +337,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
      * Re-running it on every confirmed down->up transition fixes that.
      */
     override fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
-        writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG)
-        val fmcBefore = readPlaByte(connection, PLA_FMC)
-        val fmcCleared = fmcBefore?.let { writePlaByte(connection, logDiag, PLA_FMC, it and FMC_FCR_MCU_EN.inv()) } ?: -1
-        val fmcSet = fmcBefore?.let { writePlaByte(connection, logDiag, PLA_FMC, it or FMC_FCR_MCU_EN) } ?: -1
-        val crBefore = readPlaByte(connection, PLA_CR) ?: 0
-        val crRes = writePlaByte(connection, logDiag, PLA_CR, crBefore or CR_TE or CR_RE)
-        val crReadback = readPlaByte(connection, PLA_CR)
-        writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL)
-        logDiag(
-            "RTL8153 link-up RX re-kick: FMC(clear=$fmcCleared,set=$fmcSet) " +
-                "CR(write=$crRes readback=0x${crReadback?.let { String.format("%02X", it) } ?: "read failed"})"
-        )
+        writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG, "RTL8153 link-up unlock")
+        val fmcClearOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = 0, clearMask = FMC_FCR_MCU_EN, label = "RTL8153 link-up PLA_FMC clear FCR_MCU_EN")
+        val fmcSetOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = FMC_FCR_MCU_EN, clearMask = 0, label = "RTL8153 link-up PLA_FMC set FCR_MCU_EN")
+        val crOk = writeVerifyBits(connection, logDiag, PLA_CR, setMask = CR_TE or CR_RE, clearMask = 0, label = "RTL8153 link-up PLA_CR (Rx/Tx Enable)")
+        writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL, "RTL8153 link-up lock")
+        logDiag("RTL8153 link-up RX re-kick summary: FMC(clear=$fmcClearOk,set=$fmcSetOk) CR=$crOk")
     }
 
     override fun pollLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean? {

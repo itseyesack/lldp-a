@@ -124,6 +124,27 @@ class AsixAx88179Driver : VendorAdapterDriver {
         readCmd(connection, logDiag, AX_ACCESS_PHY, AX88179_PHY_ID, phyReg, 2)?.let { toLe16(it) }
 
     /**
+     * Writes a 16-bit MAC register and reads it back to confirm the chip actually latched it -
+     * mirrors the same fix applied to RealtekRtl8153Driver: a successful controlTransfer only
+     * proves the USB host controller ACK'd the OUT packet, not that the chip applied it. Only
+     * used for RX_CTL/MEDIUM_STATUS_MODE, the two registers that gate whether the MAC actually
+     * delivers frames; the earlier PHY-power/clock/queue-tuning steps have no separate
+     * "did it take" signal worth polling here.
+     */
+    private fun writeVerifyMacValue16(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Int, label: String, maxAttempts: Int = 3): Boolean {
+        val target = value and 0xFFFF
+        for (attempt in 1..maxAttempts) {
+            val res = writeMac(connection, logDiag, reg, le16(target))
+            val readback = readMac(connection, logDiag, reg, 2)?.let { toLe16(it) }
+            val ok = res >= 0 && readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%04X", it) } ?: "read failed"} target=0x${String.format("%04X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
+    /**
      * Init sequence per ax88179_reset(): PHY power cycle, clock select, RX bulk-in queue
      * tuning, pause watermarks, checksum offload, start RX, set medium mode, restart
      * autonegotiation. LED/EEE/monitor-mode steps are cosmetic/WoL-only and are skipped -
@@ -160,17 +181,13 @@ class AsixAx88179Driver : VendorAdapterDriver {
 
         val rxCtlValue = AX_RX_CTL_DROPCRCERR or AX_RX_CTL_IPE or AX_RX_CTL_START or
             AX_RX_CTL_AP or AX_RX_CTL_AMALL or AX_RX_CTL_AB
-        val rxCtlRes = writeMac(connection, logDiag, AX_RX_CTL, le16(rxCtlValue))
-        val rxCtlReadback = readMac(connection, logDiag, AX_RX_CTL, 2)?.let { toLe16(it) }
-        logDiag("AX88179 RX_CTL (start RX, accept-all): write=$rxCtlRes readback=0x${rxCtlReadback?.let { String.format("%04X", it) } ?: "read failed"}")
-        if (rxCtlRes < 0) criticalFailures++
+        val rxCtlOk = writeVerifyMacValue16(connection, logDiag, AX_RX_CTL, rxCtlValue, "AX88179 RX_CTL (start RX, accept-all)")
+        if (!rxCtlOk) criticalFailures++
 
         val mediumValue = AX_MEDIUM_RECEIVE_EN or AX_MEDIUM_TXFLOW_CTRLEN or
             AX_MEDIUM_RXFLOW_CTRLEN or AX_MEDIUM_FULL_DUPLEX or AX_MEDIUM_GIGAMODE
-        val mediumRes = writeMac(connection, logDiag, AX_MEDIUM_STATUS_MODE, le16(mediumValue))
-        val mediumReadback = readMac(connection, logDiag, AX_MEDIUM_STATUS_MODE, 2)?.let { toLe16(it) }
-        logDiag("AX88179 MEDIUM_STATUS_MODE (enable receive/giga/full-duplex): write=$mediumRes readback=0x${mediumReadback?.let { String.format("%04X", it) } ?: "read failed"}")
-        if (mediumRes < 0) criticalFailures++
+        val mediumOk = writeVerifyMacValue16(connection, logDiag, AX_MEDIUM_STATUS_MODE, mediumValue, "AX88179 MEDIUM_STATUS_MODE (enable receive/giga/full-duplex)")
+        if (!mediumOk) criticalFailures++
 
         // Restart autonegotiation: standard MII BMCR, read-modify-write ANENABLE|ANRESTART.
         val bmcr = readPhy(connection, logDiag, MII_BMCR) ?: 0
@@ -201,8 +218,7 @@ class AsixAx88179Driver : VendorAdapterDriver {
     override fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
         val medium = readMac(connection, logDiag, AX_MEDIUM_STATUS_MODE, 2)?.let { toLe16(it) } ?: return
         if (medium and AX_MEDIUM_RECEIVE_EN == 0) {
-            val res = writeMac(connection, logDiag, AX_MEDIUM_STATUS_MODE, le16(medium or AX_MEDIUM_RECEIVE_EN))
-            logDiag("AX88179 link-up re-assert RECEIVE_EN: $res")
+            writeVerifyMacValue16(connection, logDiag, AX_MEDIUM_STATUS_MODE, medium or AX_MEDIUM_RECEIVE_EN, "AX88179 link-up re-assert RECEIVE_EN")
         }
     }
 

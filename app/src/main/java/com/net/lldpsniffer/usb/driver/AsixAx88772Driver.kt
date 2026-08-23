@@ -127,6 +127,28 @@ class AsixAx88772Driver : VendorAdapterDriver {
     private fun swReset(connection: UsbDeviceConnection, logDiag: (String) -> Unit, flags: Int): Int =
         writeCmd(connection, logDiag, AX_CMD_SW_RESET, flags, 0)
 
+    /**
+     * Writes a 16-bit value command and reads it back via the paired read command to confirm
+     * the chip actually latched it - mirrors the same fix applied to RealtekRtl8153Driver:
+     * a successful controlTransfer only proves the USB host controller ACK'd the OUT packet,
+     * not that the chip applied it. Only used for registers with a documented read-back
+     * command (RX_CTL, Medium Mode) - most of this chip's write-only setup commands (GPIO
+     * reload, PHY select, staged SW_RESET, IPG) have no corresponding read command defined
+     * here, so they're left as write-and-log.
+     */
+    private fun writeVerifyValue16(connection: UsbDeviceConnection, logDiag: (String) -> Unit, wCmd: Int, rCmd: Int, value: Int, label: String, maxAttempts: Int = 3): Boolean {
+        val target = value and 0xFFFF
+        for (attempt in 1..maxAttempts) {
+            val res = writeCmd(connection, logDiag, wCmd, target, 0)
+            val readback = readCmd(connection, logDiag, rCmd, 0, 0, 2)?.let { toLe16(it) }
+            val ok = res >= 0 && readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%04X", it) } ?: "read failed"} target=0x${String.format("%04X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
     /** Software-MII handshake: hand MDIO control to the host and wait for AX_HOST_EN. */
     private fun checkHostEnable(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean {
         repeat(HOST_EN_RETRIES) {
@@ -205,16 +227,12 @@ class AsixAx88772Driver : VendorAdapterDriver {
         logDiag("AX88772 IPG0/1/2 defaults: $ipgRes")
 
         val rxCtlValue = AX_RX_CTL_SO or AX_RX_CTL_PRO or AX_RX_CTL_AMALL or AX_RX_CTL_AB
-        val rxCtlRes = writeCmd(connection, logDiag, AX_CMD_WRITE_RX_CTL, rxCtlValue, 0)
-        val rxCtlReadback = readCmd(connection, logDiag, AX_CMD_READ_RX_CTL, 0, 0, 2)?.let { toLe16(it) }
-        logDiag("AX88772 RX_CTL (start RX, accept-all): write=$rxCtlRes readback=0x${rxCtlReadback?.let { String.format("%04X", it) } ?: "read failed"}")
-        if (rxCtlRes < 0) criticalFailures++
+        val rxCtlOk = writeVerifyValue16(connection, logDiag, AX_CMD_WRITE_RX_CTL, AX_CMD_READ_RX_CTL, rxCtlValue, "AX88772 RX_CTL (start RX, accept-all)")
+        if (!rxCtlOk) criticalFailures++
 
         val mediumValue = AX_MEDIUM_FD or AX_MEDIUM_PS or AX_MEDIUM_AC or AX_MEDIUM_RE
-        val mediumRes = writeCmd(connection, logDiag, AX_CMD_WRITE_MEDIUM_MODE, mediumValue, 0)
-        val mediumReadback = readCmd(connection, logDiag, AX_CMD_READ_MEDIUM_STATUS, 0, 0, 2)?.let { toLe16(it) }
-        logDiag("AX88772 Medium Mode (full-duplex, receive-enable): write=$mediumRes readback=0x${mediumReadback?.let { String.format("%04X", it) } ?: "read failed"}")
-        if (mediumRes < 0) criticalFailures++
+        val mediumOk = writeVerifyValue16(connection, logDiag, AX_CMD_WRITE_MEDIUM_MODE, AX_CMD_READ_MEDIUM_STATUS, mediumValue, "AX88772 Medium Mode (full-duplex, receive-enable)")
+        if (!mediumOk) criticalFailures++
 
         val bmcr = mdioRead(connection, logDiag, phyId, MII_BMCR) ?: 0
         val nwayOk = mdioWrite(connection, logDiag, phyId, MII_BMCR, bmcr or BMCR_ANENABLE or BMCR_ANRESTART)
@@ -243,8 +261,7 @@ class AsixAx88772Driver : VendorAdapterDriver {
     override fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
         val medium = readCmd(connection, logDiag, AX_CMD_READ_MEDIUM_STATUS, 0, 0, 2)?.let { toLe16(it) } ?: return
         if (medium and AX_MEDIUM_RE == 0) {
-            val res = writeCmd(connection, logDiag, AX_CMD_WRITE_MEDIUM_MODE, medium or AX_MEDIUM_RE, 0)
-            logDiag("AX88772 link-up re-assert RE: $res")
+            writeVerifyValue16(connection, logDiag, AX_CMD_WRITE_MEDIUM_MODE, AX_CMD_READ_MEDIUM_STATUS, medium or AX_MEDIUM_RE, "AX88772 link-up re-assert RE")
         }
     }
 
