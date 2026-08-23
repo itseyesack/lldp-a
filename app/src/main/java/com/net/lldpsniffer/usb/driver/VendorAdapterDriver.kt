@@ -38,12 +38,9 @@ interface VendorAdapterDriver {
      *
      * [bringUp] deliberately leaves RX blocked: it can spend seconds waiting for PHY
      * autonegotiation, and on a chip whose link is already up, frames accepted during that
-     * window pile into an RX FIFO nothing is draining yet. Overrunning it wedges the RX DMA
-     * on real hardware - registers still verify, the link still reports up, control
-     * transfers still work, but no frame ever reaches the host until the device is
-     * physically replugged. Enabling RX only once a reader is attached keeps that window at
-     * microseconds instead of seconds, matching how the kernel only ungates RX on the
-     * carrier-on path alongside submitting its RX URBs.
+     * window pile into an RX FIFO nothing is draining yet. Enabling RX only once a reader is
+     * attached keeps that window at microseconds instead of seconds, matching how the kernel
+     * ungates RX from its open path alongside submitting its RX URBs, not during init.
      */
     fun startRx(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {}
 
