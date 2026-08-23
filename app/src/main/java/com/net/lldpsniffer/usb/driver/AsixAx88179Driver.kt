@@ -130,13 +130,21 @@ class AsixAx88179Driver : VendorAdapterDriver {
      * used for RX_CTL/MEDIUM_STATUS_MODE, the two registers that gate whether the MAC actually
      * delivers frames; the earlier PHY-power/clock/queue-tuning steps have no separate
      * "did it take" signal worth polling here.
+     *
+     * A hard transfer failure (the write itself erroring, not just a value mismatch) means
+     * the device isn't responding right now - retrying immediately just adds traffic to an
+     * already-unresponsive bus, so that case fails fast instead of exhausting all attempts.
      */
     private fun writeVerifyMacValue16(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Int, label: String, maxAttempts: Int = 3): Boolean {
         val target = value and 0xFFFF
         for (attempt in 1..maxAttempts) {
             val res = writeMac(connection, logDiag, reg, le16(target))
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
             val readback = readMac(connection, logDiag, reg, 2)?.let { toLe16(it) }
-            val ok = res >= 0 && readback == target
+            val ok = readback == target
             logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%04X", it) } ?: "read failed"} target=0x${String.format("%04X", target)} ${if (ok) "OK" else "MISMATCH"}")
             if (ok) return true
             if (attempt < maxAttempts) Thread.sleep(10)

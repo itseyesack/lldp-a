@@ -135,13 +135,21 @@ class AsixAx88772Driver : VendorAdapterDriver {
      * command (RX_CTL, Medium Mode) - most of this chip's write-only setup commands (GPIO
      * reload, PHY select, staged SW_RESET, IPG) have no corresponding read command defined
      * here, so they're left as write-and-log.
+     *
+     * A hard transfer failure (the write itself erroring, not just a value mismatch) means
+     * the device isn't responding right now - retrying immediately just adds traffic to an
+     * already-unresponsive bus, so that case fails fast instead of exhausting all attempts.
      */
     private fun writeVerifyValue16(connection: UsbDeviceConnection, logDiag: (String) -> Unit, wCmd: Int, rCmd: Int, value: Int, label: String, maxAttempts: Int = 3): Boolean {
         val target = value and 0xFFFF
         for (attempt in 1..maxAttempts) {
             val res = writeCmd(connection, logDiag, wCmd, target, 0)
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
             val readback = readCmd(connection, logDiag, rCmd, 0, 0, 2)?.let { toLe16(it) }
-            val ok = res >= 0 && readback == target
+            val ok = readback == target
             logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%04X", it) } ?: "read failed"} target=0x${String.format("%04X", target)} ${if (ok) "OK" else "MISMATCH"}")
             if (ok) return true
             if (attempt < maxAttempts) Thread.sleep(10)

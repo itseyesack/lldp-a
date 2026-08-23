@@ -160,8 +160,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         val target = value and 0xFF
         for (attempt in 1..maxAttempts) {
             val res = writePlaByte(connection, logDiag, reg, target)
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
             val readback = readPlaByte(connection, reg)
-            val ok = res >= 0 && readback == target
+            val ok = readback == target
             logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} target=0x${String.format("%02X", target)} ${if (ok) "OK" else "MISMATCH"}")
             if (ok) return true
             if (attempt < maxAttempts) Thread.sleep(10)
@@ -173,8 +177,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         val target = value and 0xFFFF
         for (attempt in 1..maxAttempts) {
             val res = writePlaWord(connection, logDiag, reg, target)
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
             val readback = readPlaWord(connection, reg)
-            val ok = res >= 0 && readback == target
+            val ok = readback == target
             logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=${readback?.let { "0x" + String.format("%04X", it) } ?: "read failed"} target=0x${String.format("%04X", target)} ${if (ok) "OK" else "MISMATCH"}")
             if (ok) return true
             if (attempt < maxAttempts) Thread.sleep(10)
@@ -186,8 +194,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         val target = value and 0xFFFFFFFFL
         for (attempt in 1..maxAttempts) {
             val res = writePlaDword(connection, logDiag, reg, target)
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
             val readback = readPlaDword(connection, reg)
-            val ok = res >= 0 && readback == target
+            val ok = readback == target
             logDiag("$label (attempt $attempt/$maxAttempts): write=$res readback=0x${readback?.let { String.format("%08X", it) } ?: "read failed"} target=0x${String.format("%08X", target)} ${if (ok) "OK" else "MISMATCH"}")
             if (ok) return true
             if (attempt < maxAttempts) Thread.sleep(10)
@@ -199,19 +211,28 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
      * Read-modify-write a byte register (matching the kernel's ocp_byte_set_bits/clear_bits):
      * re-reads the current value on every attempt rather than reusing one snapshot, so a bit
      * that another retry already managed to land isn't clobbered back off by this one.
+     *
+     * A hard transfer failure (pre-read or write returning an error, not just a value
+     * mismatch) means the device isn't responding right now - observed on hardware to
+     * follow a chip-level drop that needs the device to fully re-enumerate, so hammering
+     * it with more immediate retries only adds traffic to an already-unresponsive bus.
+     * Those cases fail fast instead of exhausting all attempts.
      */
     private fun writeVerifyBits(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, setMask: Int, clearMask: Int, label: String, maxAttempts: Int = 3): Boolean {
         for (attempt in 1..maxAttempts) {
             val current = readPlaByte(connection, reg)
             if (current == null) {
-                logDiag("$label (attempt $attempt/$maxAttempts): pre-read failed")
-                if (attempt < maxAttempts) Thread.sleep(10)
-                continue
+                logDiag("$label (attempt $attempt/$maxAttempts): pre-read failed - device unresponsive, not retrying")
+                return false
             }
             val target = (current and clearMask.inv()) or setMask
             val res = writePlaByte(connection, logDiag, reg, target)
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
             val readback = readPlaByte(connection, reg)
-            val ok = res >= 0 && readback == target
+            val ok = readback == target
             logDiag("$label (attempt $attempt/$maxAttempts): current=0x${String.format("%02X", current)} write=$res readback=${readback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} target=0x${String.format("%02X", target)} ${if (ok) "OK" else "MISMATCH"}")
             if (ok) return true
             if (attempt < maxAttempts) Thread.sleep(10)
@@ -233,12 +254,16 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
 
         logDiag("Configuring RTL8153 Vendor Registers (with Linux r8152 byte-enables)...")
 
-        // 1. Unlock config-locked registers before touching RCR/CR/RMS/MAR. If this doesn't
-        // actually latch, every locked-register write below will predictably fail its own
-        // verification too - counted here as well since it's the earliest point the whole
-        // sequence can go wrong.
-        val unlocked = writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG, "RTL8153 PLA_CRWECR unlock")
-        if (!unlocked) criticalFailures++
+        // 1. Unlock config-locked registers before touching RCR/CR/RMS/MAR. This register's
+        // readback doesn't reliably echo what was written on real hardware - observed a
+        // consistent 0xD0 after writing 0xC0, with no timeout/error symptoms, so it isn't a
+        // bus fault, just an unreliable echo - and the kernel driver never reads it back
+        // either. Only the write's own transfer result gates failure here; the real signal
+        // that the unlock actually took is whether the locked-register writes below succeed.
+        val unlockRes = writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG)
+        val unlockReadback = readPlaByte(connection, PLA_CRWECR)
+        logDiag("RTL8153 PLA_CRWECR unlock: write=$unlockRes readback=${unlockReadback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} (informational only, not gated)")
+        if (unlockRes < 0) criticalFailures++
 
         // 2. Reset the MAC (PLA_CR bit RST) and poll until the device clears it.
         val resetIssued = writePlaByte(connection, logDiag, PLA_CR, CR_RST)
@@ -295,10 +320,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         val rxdyGateOk = writeVerifyBits(connection, logDiag, PLA_MISC_1, setMask = 0, clearMask = RXDY_GATED_EN, label = "RTL8153 PLA_MISC_1 RXDY_GATED_EN clear")
         if (!rxdyGateOk) criticalFailures++
 
-        // 7. Re-lock config registers. Verified for visibility, but not counted as a
-        // critical failure - by this point RX/TX are already enabled, so failing to re-lock
-        // doesn't stop traffic, it only leaves config-write-enable on longer than intended.
-        writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL, "RTL8153 PLA_CRWECR lock")
+        // 7. Re-lock config registers. Same unreliable-readback caveat as the unlock above -
+        // logged for visibility only, not gated, and by this point RX/TX are already
+        // enabled so failing to re-lock doesn't stop traffic anyway.
+        val lockRes = writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL)
+        val lockReadback = readPlaByte(connection, PLA_CRWECR)
+        logDiag("RTL8153 PLA_CRWECR lock: write=$lockRes readback=${lockReadback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} (informational only, not gated)")
 
         // 8. Poll PHY Link Status for a few seconds instead of a single immediate read.
         // A one-shot check right after the MAC reset above previously misreported a
@@ -337,11 +364,13 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
      * Re-running it on every confirmed down->up transition fixes that.
      */
     override fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
-        writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG, "RTL8153 link-up unlock")
+        // PLA_CRWECR's readback doesn't reliably echo what was written (see bringUp) -
+        // written and moved past without retrying, same as the attach-time bring-up.
+        writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG)
         val fmcClearOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = 0, clearMask = FMC_FCR_MCU_EN, label = "RTL8153 link-up PLA_FMC clear FCR_MCU_EN")
         val fmcSetOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = FMC_FCR_MCU_EN, clearMask = 0, label = "RTL8153 link-up PLA_FMC set FCR_MCU_EN")
         val crOk = writeVerifyBits(connection, logDiag, PLA_CR, setMask = CR_TE or CR_RE, clearMask = 0, label = "RTL8153 link-up PLA_CR (Rx/Tx Enable)")
-        writeVerifyByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL, "RTL8153 link-up lock")
+        writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL)
         logDiag("RTL8153 link-up RX re-kick summary: FMC(clear=$fmcClearOk,set=$fmcSetOk) CR=$crOk")
     }
 
