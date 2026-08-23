@@ -203,6 +203,38 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
     }
 
     /**
+     * Read-modify-write a dword register, same shape as writeVerifyBits below but for the
+     * wider registers (PLA_RCR) that need it: hardware showed RCR consistently reading back
+     * with an extra bit set (0x00020000) that was never written and can't be cleared by
+     * writing 0 to it - some bits in this register are apparently owned by the chip itself,
+     * not just an unwritten reserved field. A blind absolute write's readback could never
+     * match that, permanently flagging bring-up as broken. Reading current and only
+     * OR/AND-ing the bits this driver actually cares about preserves whatever the chip owns
+     * instead of fighting it.
+     */
+    private fun writeVerifyDwordBits(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, setMask: Long, clearMask: Long, label: String, maxAttempts: Int = 3): Boolean {
+        for (attempt in 1..maxAttempts) {
+            val current = readPlaDword(connection, reg)
+            if (current == null) {
+                logDiag("$label (attempt $attempt/$maxAttempts): pre-read failed - device unresponsive, not retrying")
+                return false
+            }
+            val target = (current and clearMask.inv()) or setMask
+            val res = writePlaDword(connection, logDiag, reg, target)
+            if (res < 0) {
+                logDiag("$label (attempt $attempt/$maxAttempts): write transfer failed (res=$res) - device unresponsive, not retrying")
+                return false
+            }
+            val readback = readPlaDword(connection, reg)
+            val ok = readback == target
+            logDiag("$label (attempt $attempt/$maxAttempts): current=0x${String.format("%08X", current)} write=$res readback=0x${readback?.let { String.format("%08X", it) } ?: "read failed"} target=0x${String.format("%08X", target)} ${if (ok) "OK" else "MISMATCH"}")
+            if (ok) return true
+            if (attempt < maxAttempts) Thread.sleep(10)
+        }
+        return false
+    }
+
+    /**
      * Read-modify-write a byte register (matching the kernel's ocp_byte_set_bits/clear_bits):
      * re-reads the current value on every attempt rather than reusing one snapshot, so a bit
      * that another retry already managed to land isn't clobbered back off by this one.
@@ -289,11 +321,8 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         if (!mar0Ok || !mar4Ok) criticalFailures++
 
         // 5. Configure PLA_RCR: AAP|APM|AM|AB = accept everything (promiscuous sniffing).
-        // Verified via readback instead of trusting the transfer's return code - a successful
-        // controlTransfer only proves the USB host controller ACK'd the OUT packet, not that
-        // the chip's MCU actually decoded and applied it. Several prior fixes assumed
-        // "transfer succeeded" == "register took effect" and were wrong.
-        val rcrOk = writeVerifyDword(connection, logDiag, PLA_RCR, RCR_ACCEPT_ALL.toLong(), "RTL8153 PLA_RCR (accept-all 0x0F)")
+        // Read-modify-write, not a blind absolute value - see writeVerifyDwordBits for why.
+        val rcrOk = writeVerifyDwordBits(connection, logDiag, PLA_RCR, setMask = RCR_ACCEPT_ALL.toLong(), clearMask = 0L, label = "RTL8153 PLA_RCR (accept-all 0x0F)")
         if (!rcrOk) criticalFailures++
 
         // 5.5. Reset the RX packet filter (PLA_FMC FCR_MCU_EN off/on), matching the kernel's

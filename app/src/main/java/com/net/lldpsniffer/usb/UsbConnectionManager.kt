@@ -726,15 +726,7 @@ class UsbConnectionManager(private val context: Context) {
      * same UsbDevice and rebuild everything from scratch as an automatic recovery attempt.
      */
     private fun teardownForReconnect(connection: UsbDeviceConnection) {
-        // A plain close()+reopen() was observed on hardware to be insufficient - the reopened
-        // connection immediately failed every register write, meaning the chip itself was still
-        // wedged rather than merely the app's handle to it. A real port-level reset (equivalent
-        // to a physical unplug/replug) gives the upcoming reopen an actual chance to succeed.
-        val resetOk = UsbBusReset.reset(connection)
-        logDiag(
-            if (resetOk) "Issued a USB port reset before reopening."
-            else "USB port reset unavailable or failed - falling back to a plain close+reopen."
-        )
+        logDiag("Closing connection before reopen.")
         synchronized(this) {
             for (iface in claimedInterfaces) {
                 try {
