@@ -32,6 +32,10 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         private const val FMC_FCR_MCU_EN = 0x0001
         private const val PLA_MISC_1 = 0xE85A
         private const val RXDY_GATED_EN = 0x0008
+        private const val PLA_OOB_CTRL = 0xE84F
+        private const val FIFO_EMPTY = 0x30 // TXFIFO_EMPTY (0x20) | RXFIFO_EMPTY (0x10)
+        private const val PLA_TCR0 = 0xE610
+        private const val TCR0_TX_EMPTY = 0x0800
         private const val CRWECR_CONFIG = 0xC0
         private const val CRWECR_NORMAL = 0x00
         private const val RCR_ACCEPT_ALL = 0x0000000F
@@ -268,6 +272,48 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
     }
 
     /**
+     * Mirrors the version-independent front half of the kernel's rtl_disable() (r8152.c):
+     * stop accepting packets, gate RX at the FIFO, and wait for the RX/TX FIFOs to drain
+     * before the MAC reset that follows. On hardware, attaching to a chip that was left
+     * running - either a prior app session that didn't disable cleanly, or a genuinely
+     * warm chip from before this process started - produced a bring-up where every
+     * register write read back OK, link reported up at gigabit, but zero bytes ever
+     * arrived on the bulk pipe, and the chip stopped answering control transfers
+     * entirely about 12s later. The MAC reset that follows apparently isn't sufficient
+     * on its own to resync DMA/endpoint state with a host-side bulk pipe that's about to
+     * be reopened while packets are still in flight. A genuinely cold chip (FIFOs
+     * already empty, RCR/MISC_1 already at their cleared values) no-ops through this.
+     * The chip-revision-specific BMU endpoint reset the kernel does after this (only for
+     * older RTL8152 sub-revisions rtl8152_nic_reset can't tell apart from a USB VID/PID
+     * alone) is intentionally not replicated here - guessing that shape wrong on the
+     * wrong revision risks the same kind of MCU-wedge the read-shape bug caused earlier.
+     */
+    private fun rtlDisable(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
+        val rcrOk = writeVerifyDwordBits(connection, logDiag, PLA_RCR, setMask = 0L, clearMask = RCR_ACCEPT_ALL.toLong(), label = "RTL8153 pre-disable PLA_RCR clear accept-all")
+        val gateOk = writeVerifyBits(connection, logDiag, PLA_MISC_1, setMask = RXDY_GATED_EN, clearMask = 0, label = "RTL8153 pre-disable PLA_MISC_1 RXDY_GATED_EN set")
+
+        var rxFifoEmpty = false
+        for (attempt in 1..100) {
+            val oob = readPlaByte(connection, PLA_OOB_CTRL)
+            if (oob != null && (oob and FIFO_EMPTY) == FIFO_EMPTY) {
+                rxFifoEmpty = true
+                break
+            }
+            Thread.sleep(5)
+        }
+        var txEmpty = false
+        for (attempt in 1..100) {
+            val tcr0 = readPlaWord(connection, PLA_TCR0)
+            if (tcr0 != null && (tcr0 and TCR0_TX_EMPTY) != 0) {
+                txEmpty = true
+                break
+            }
+            Thread.sleep(5)
+        }
+        logDiag("RTL8153 pre-disable drain: rcrClearOk=$rcrOk gateSetOk=$gateOk rxFifoEmpty=$rxFifoEmpty txEmpty=$txEmpty")
+    }
+
+    /**
      * Byte-enable protocol (Linux r8152.c generic_ocp_write): unaligned writes always send a
      * 4-byte transfer with the value shifted into the lane selected by byte_en, not a short
      * transfer of just the changed bytes - a short transfer silently writes into the wrong lane.
@@ -291,6 +337,10 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         val unlockReadback = readPlaByte(connection, PLA_CRWECR)
         logDiag("RTL8153 PLA_CRWECR unlock: write=$unlockRes readback=${unlockReadback?.let { "0x" + String.format("%02X", it) } ?: "read failed"} (informational only, not gated)")
         if (unlockRes < 0) criticalFailures++
+
+        // 1.5. Stop acceptance and drain the FIFOs before resetting - see rtlDisable for
+        // why this matters on a chip that was already running when we attached.
+        rtlDisable(connection, logDiag)
 
         // 2. Reset the MAC (PLA_CR bit RST) and poll until the device clears it.
         val resetIssued = writePlaByte(connection, logDiag, PLA_CR, CR_RST)
