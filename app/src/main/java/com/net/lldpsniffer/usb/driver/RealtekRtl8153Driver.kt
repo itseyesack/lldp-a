@@ -387,11 +387,12 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         val crOk = writeVerifyBits(connection, logDiag, PLA_CR, setMask = CR_TE or CR_RE, clearMask = 0, label = "RTL8153 PLA_CR (Rx/Tx Enable)")
         if (!crOk) criticalFailures++
 
-        // 6.5. Clear RXDY_GATED_EN in PLA_MISC_1. The kernel's rtl_enable() always clears
-        // this as the final step before traffic flows - when set, it gates (blocks) the
-        // RX-ready signal at the FIFO, so the MAC can look fully RX-enabled with link up
-        // and still deliver zero bytes to the host.
-        val rxdyGateOk = writeVerifyBits(connection, logDiag, PLA_MISC_1, setMask = 0, clearMask = RXDY_GATED_EN, label = "RTL8153 PLA_MISC_1 RXDY_GATED_EN clear")
+        // 6.5. Leave RXDY_GATED_EN *set*, so the MAC is fully configured but still holding
+        // frames off the FIFO. [startRx] clears it once the bulk reader is attached - see
+        // that method and VendorAdapterDriver.startRx for why enabling RX here instead
+        // wedges the RX DMA whenever the link is already up. The MAC reset in step 2 can
+        // clear this bit, so re-assert it explicitly rather than relying on rtlDisable's.
+        val rxdyGateOk = writeVerifyBits(connection, logDiag, PLA_MISC_1, setMask = RXDY_GATED_EN, clearMask = 0, label = "RTL8153 PLA_MISC_1 RXDY_GATED_EN hold (RX released in startRx)")
         if (!rxdyGateOk) criticalFailures++
 
         // 7. Re-lock config registers. Same unreliable-readback caveat as the unlock above -
@@ -413,12 +414,10 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
             Thread.sleep(100)
         }
         if (linkByte != null) {
-            val linkUp = decodeAndLogLinkStatus(linkByte, logDiag).up
-            if (linkUp) {
-                // Link may have come up seconds after the FMC/CR sequence above already ran
-                // while link was still down - re-kick now that it's confirmed up.
-                onLinkUp(connection, logDiag)
-            }
+            // Reported for status only - RX intentionally stays gated regardless of link
+            // state until startRx runs. Kicking the RX path here (as this used to) is
+            // exactly the premature enable that wedges the FIFO on an already-linked chip.
+            decodeAndLogLinkStatus(linkByte, logDiag)
         } else {
             logDiag("RTL8153 PHY Link Status (0xE908): read failed - link state unknown")
         }
@@ -430,23 +429,34 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
     }
 
     /**
-     * Re-issues the packet-filter reset + TE/RE enable that [bringUp] normally runs once
-     * at attach. The kernel's r8152 driver reruns this same sequence on every link-change-
-     * to-up event (its link-change worker), not just once at device open - if our one-shot
-     * attach-time bring-up ran while the PHY was still negotiating (link still down), the
-     * chip's RX FIFO delivery never actually unblocked even after link later came up.
-     * Re-running it on every confirmed down->up transition fixes that.
+     * The kernel's rtl_enable(): reset the packet filter, assert TE/RE, then release the
+     * RX gate - in that order, with the ungate last. [bringUp] deliberately stops short of
+     * the ungate, so this is what actually starts frames flowing.
      */
-    override fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {
+    private fun rtlEnableRx(connection: UsbDeviceConnection, logDiag: (String) -> Unit, phase: String) {
         // PLA_CRWECR's readback doesn't reliably echo what was written (see bringUp) -
         // written and moved past without retrying, same as the attach-time bring-up.
         writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_CONFIG)
-        val fmcClearOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = 0, clearMask = FMC_FCR_MCU_EN, label = "RTL8153 link-up PLA_FMC clear FCR_MCU_EN")
-        val fmcSetOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = FMC_FCR_MCU_EN, clearMask = 0, label = "RTL8153 link-up PLA_FMC set FCR_MCU_EN")
-        val crOk = writeVerifyBits(connection, logDiag, PLA_CR, setMask = CR_TE or CR_RE, clearMask = 0, label = "RTL8153 link-up PLA_CR (Rx/Tx Enable)")
+        val fmcClearOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = 0, clearMask = FMC_FCR_MCU_EN, label = "RTL8153 $phase PLA_FMC clear FCR_MCU_EN")
+        val fmcSetOk = writeVerifyBits(connection, logDiag, PLA_FMC, setMask = FMC_FCR_MCU_EN, clearMask = 0, label = "RTL8153 $phase PLA_FMC set FCR_MCU_EN")
+        val crOk = writeVerifyBits(connection, logDiag, PLA_CR, setMask = CR_TE or CR_RE, clearMask = 0, label = "RTL8153 $phase PLA_CR (Rx/Tx Enable)")
+        val ungateOk = writeVerifyBits(connection, logDiag, PLA_MISC_1, setMask = 0, clearMask = RXDY_GATED_EN, label = "RTL8153 $phase PLA_MISC_1 RXDY_GATED_EN clear")
         writePlaByte(connection, logDiag, PLA_CRWECR, CRWECR_NORMAL)
-        logDiag("RTL8153 link-up RX re-kick summary: FMC(clear=$fmcClearOk,set=$fmcSetOk) CR=$crOk")
+        logDiag("RTL8153 $phase RX enable summary: FMC(clear=$fmcClearOk,set=$fmcSetOk) CR=$crOk ungate=$ungateOk")
     }
+
+    /** Releases the RX gate [bringUp] left set, now that the bulk reader is attached. */
+    override fun startRx(connection: UsbDeviceConnection, logDiag: (String) -> Unit) =
+        rtlEnableRx(connection, logDiag, "start-rx")
+
+    /**
+     * Re-runs the same enable sequence on a confirmed down->up transition mid-capture. The
+     * chip re-asserts RXDY_GATED_EN itself when the link drops, so a flap needs the ungate
+     * repeated or RX silently stays blocked after the link returns. Safe to ungate here
+     * (unlike during bring-up) because the bulk read loop is already running by this point.
+     */
+    override fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) =
+        rtlEnableRx(connection, logDiag, "link-up")
 
     override fun pollLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean? {
         val phyByte = readPlaPhyStatus(connection) ?: return null

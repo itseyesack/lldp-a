@@ -33,6 +33,20 @@ interface VendorAdapterDriver {
      */
     fun bringUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit): Boolean
 
+    /**
+     * Unblocks the chip's RX path, called immediately before the bulk IN read loop starts.
+     *
+     * [bringUp] deliberately leaves RX blocked: it can spend seconds waiting for PHY
+     * autonegotiation, and on a chip whose link is already up, frames accepted during that
+     * window pile into an RX FIFO nothing is draining yet. Overrunning it wedges the RX DMA
+     * on real hardware - registers still verify, the link still reports up, control
+     * transfers still work, but no frame ever reaches the host until the device is
+     * physically replugged. Enabling RX only once a reader is attached keeps that window at
+     * microseconds instead of seconds, matching how the kernel only ungates RX on the
+     * carrier-on path alongside submitting its RX URBs.
+     */
+    fun startRx(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {}
+
     /** Re-run whatever subset of [bringUp] needs to repeat after a down->up link transition. */
     fun onLinkUp(connection: UsbDeviceConnection, logDiag: (String) -> Unit) {}
 

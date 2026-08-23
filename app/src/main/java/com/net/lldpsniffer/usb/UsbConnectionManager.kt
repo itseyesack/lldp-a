@@ -594,6 +594,11 @@ class UsbConnectionManager(private val context: Context) {
         val readBuffer = ByteArray(20480) // 20KB buffer - matches AX88179's recommended rx_urb_size
         logDiag("Starting Bulk IN packet ingestion loop on EP Address 0x${String.format("%02X", endpointIn.address)} (Buffer=20KB)...")
 
+        // Release the chip's RX path only now, immediately before the first bulkTransfer.
+        // bringUp() leaves RX blocked precisely so this gap stays at microseconds - see
+        // VendorAdapterDriver.startRx for what enabling it any earlier does to the RX FIFO.
+        driver?.startRx(connection, ::logDiag)
+
         val startTime = System.currentTimeMillis()
         var lastLogTime = System.currentTimeMillis()
         var lastLinkPollTime = System.currentTimeMillis()
