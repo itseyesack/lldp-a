@@ -68,6 +68,16 @@ class UsbConnectionManager(private val context: Context) {
         // Standard USB GET_CONFIGURATION request (USB 2.0 spec 9.4.2)
         private const val REQUEST_TYPE_STANDARD_DEVICE_IN = 0x80
         private const val REQUEST_GET_CONFIGURATION = 0x08
+
+        // Some flaky adapters/cables lose the underlying USB connection mid-capture (every
+        // control transfer starts failing, no more data ever arrives) without Android ever
+        // reporting a real ACTION_USB_DEVICE_DETACHED for it - confirmed on hardware where
+        // UsbHostManager's own log showed no "Removed device" event during the outage. Since
+        // no detach broadcast is coming, the app has to notice the dead connection itself and
+        // recover by reopening the same UsbDevice, instead of spinning on bulkTransfer forever.
+        private const val CONSECUTIVE_LINK_POLL_FAILURE_THRESHOLD = 3
+        private const val MAX_RECONNECT_ATTEMPTS = 5
+        private const val RECONNECT_DELAY_MS = 750L
     }
 
     // Chip-specific vendor-mode bring-up/link-poll drivers. Adding support for a new USB
@@ -292,7 +302,7 @@ class UsbConnectionManager(private val context: Context) {
         logDiag("Starting capture for device ${device.deviceName} (VID: 0x${String.format("%04X", device.vendorId)}, PID: 0x${String.format("%04X", device.productId)})...")
     }
 
-    private suspend fun runCaptureSetup(device: UsbDevice) {
+    private suspend fun runCaptureSetup(device: UsbDevice, reconnectAttempt: Int = 0) {
         try {
             val connection = usbManager.openDevice(device)
                 ?: throw IllegalStateException("usbManager.openDevice returned null. USB Host permission might be missing.")
@@ -521,7 +531,25 @@ class UsbConnectionManager(private val context: Context) {
             // Link polling only happens when a vendor driver matched this device; CDC-ECM
             // (Config 2) has no equivalent poll wired up here, so live link tracking is
             // vendor-mode only.
-            runIngestionLoop(connection, epIn, activeVendorDriver)
+            val connectionLost = runIngestionLoop(connection, epIn, activeVendorDriver)
+
+            if (connectionLost && activeDevice == device && reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+                val nextAttempt = reconnectAttempt + 1
+                logDiag(
+                    "Connection to the adapter appears dead (no data or register access for a sustained " +
+                        "period, with no USB detach event) - reopening the device automatically " +
+                        "(attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)."
+                )
+                teardownForReconnect(connection)
+                _connectionState.value = UsbConnectionState.Connecting("Reconnecting to adapter (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)...")
+                delay(RECONNECT_DELAY_MS)
+                if (activeDevice == device) {
+                    runCaptureSetup(device, nextAttempt)
+                }
+            } else if (connectionLost) {
+                logDiag("ERROR: Automatic recovery exhausted after $reconnectAttempt attempt(s) - giving up until the adapter is unplugged and replugged.")
+                stopCapture()
+            }
 
         } catch (e: Exception) {
             logDiag("Error during USB capture setup: ${e.localizedMessage}")
@@ -531,7 +559,8 @@ class UsbConnectionManager(private val context: Context) {
         }
     }
 
-    private suspend fun runIngestionLoop(connection: UsbDeviceConnection, endpointIn: UsbEndpoint, driver: VendorAdapterDriver?) {
+    /** @return true if the loop exited because the connection appears dead and should be reopened. */
+    private suspend fun runIngestionLoop(connection: UsbDeviceConnection, endpointIn: UsbEndpoint, driver: VendorAdapterDriver?): Boolean {
         val readBuffer = ByteArray(20480) // 20KB buffer - matches AX88179's recommended rx_urb_size
         logDiag("Starting Bulk IN packet ingestion loop on EP Address 0x${String.format("%02X", endpointIn.address)} (Buffer=20KB)...")
 
@@ -540,6 +569,8 @@ class UsbConnectionManager(private val context: Context) {
         var lastLinkPollTime = System.currentTimeMillis()
         var totalBytesRead = 0L
         var consecutiveErrors = 0
+        var consecutiveLinkPollFailures = 0
+        var connectionLost = false
 
         withContext(Dispatchers.IO) {
             while (isActive && activeConnection == connection) {
@@ -557,7 +588,17 @@ class UsbConnectionManager(private val context: Context) {
                         // not evidence the link actually went down. Previously this overwrote a
                         // confirmed "up" state with null/Unknown on a single flaky poll, even
                         // though the link never moved. Keep the last known-good state instead.
+                        consecutiveLinkPollFailures++
+                        if (consecutiveLinkPollFailures >= CONSECUTIVE_LINK_POLL_FAILURE_THRESHOLD) {
+                            logDiag(
+                                "ERROR: $consecutiveLinkPollFailures consecutive link status polls failed - " +
+                                    "the USB connection is no longer responding to control transfers."
+                            )
+                            connectionLost = true
+                            break
+                        }
                     } else {
+                        consecutiveLinkPollFailures = 0
                         _linkStatus.value = newStatus
                         val newLinkUp = newStatus.up
                         if (newLinkUp != _linkState.value) {
@@ -637,12 +678,42 @@ class UsbConnectionManager(private val context: Context) {
 
                     if (consecutiveErrors > 200) {
                         logDiag("ERROR: Excessive consecutive USB bulkTransfer errors (>200). Connection likely lost.")
+                        connectionLost = true
                         break
                     }
                 } else {
                     delay(50)
                 }
             }
+        }
+        return connectionLost
+    }
+
+    /**
+     * Releases and closes a connection that runIngestionLoop determined is dead, without
+     * touching activeDevice/link-state/history/peer-list - unlike stopCapture(), this is not
+     * a user-visible disconnect, just clearing the way for runCaptureSetup() to reopen the
+     * same UsbDevice and rebuild everything from scratch as an automatic recovery attempt.
+     */
+    private fun teardownForReconnect(connection: UsbDeviceConnection) {
+        synchronized(this) {
+            for (iface in claimedInterfaces) {
+                try {
+                    connection.releaseInterface(iface)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error releasing interface ${iface.id} during reconnect", e)
+                }
+            }
+            try {
+                connection.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing UsbDeviceConnection during reconnect", e)
+            }
+            claimedInterfaces.clear()
+            if (activeConnection == connection) {
+                activeConnection = null
+            }
+            activeVendorDriver = null
         }
     }
 
