@@ -152,6 +152,24 @@ class UsbConnectionManager(private val context: Context) {
     }
 
     /**
+     * Reads link status via the vendor driver, logging (rather than silently
+     * swallowing) a control-transfer failure. readLinkStatus() returns null on
+     * such a failure with no logging of its own - callers must not treat that
+     * null as "link is down"; it only means this particular poll didn't get a
+     * reading, and should keep whatever state they already trust.
+     */
+    private fun VendorAdapterDriver.readLinkStatusLogged(
+        connection: UsbDeviceConnection,
+        failureContext: String
+    ): LinkStatus? {
+        val status = readLinkStatus(connection, ::logDiag)
+        if (status == null) {
+            logDiag("$failureContext: link status read failed (control transfer error).")
+        }
+        return status
+    }
+
+    /**
      * Reads the device's actual active bConfigurationValue via the standard
      * GET_CONFIGURATION request, instead of inferring it from setConfiguration()'s
      * boolean return value (which does not distinguish "already in that config"
@@ -444,7 +462,7 @@ class UsbConnectionManager(private val context: Context) {
                     if (matchedDriver != null) {
                         logDiag("Matched vendor adapter driver: ${matchedDriver.name}")
                         vendorRxConfirmed = matchedDriver.bringUp(connection, ::logDiag)
-                        val initialStatus = matchedDriver.readLinkStatus(connection, ::logDiag)
+                        val initialStatus = matchedDriver.readLinkStatusLogged(connection, "Initial link status read")
                         _linkStatus.value = initialStatus
                         _linkState.value = initialStatus?.up
                     } else {
@@ -533,16 +551,23 @@ class UsbConnectionManager(private val context: Context) {
                 // when the state actually changes, to avoid spamming the log every 2s.
                 if (driver != null && now - lastLinkPollTime >= 2000) {
                     lastLinkPollTime = now
-                    val newStatus = driver.readLinkStatus(connection, ::logDiag)
-                    val newLinkUp = newStatus?.up
-                    _linkStatus.value = newStatus
-                    if (newLinkUp != _linkState.value) {
-                        val wasUp = _linkState.value == true
-                        _linkState.value = newLinkUp
-                        if (newLinkUp == true && !wasUp) {
-                            // Down->up transition mid-capture (e.g. a link flap) - rerun
-                            // the RX-enable kick, same as the initial bring-up does.
-                            driver.onLinkUp(connection, ::logDiag)
+                    val newStatus = driver.readLinkStatusLogged(connection, "Link status poll")
+                    if (newStatus == null) {
+                        // A failed register read (transient USB/control-transfer hiccup) is
+                        // not evidence the link actually went down. Previously this overwrote a
+                        // confirmed "up" state with null/Unknown on a single flaky poll, even
+                        // though the link never moved. Keep the last known-good state instead.
+                    } else {
+                        _linkStatus.value = newStatus
+                        val newLinkUp = newStatus.up
+                        if (newLinkUp != _linkState.value) {
+                            val wasUp = _linkState.value == true
+                            _linkState.value = newLinkUp
+                            if (newLinkUp && !wasUp) {
+                                // Down->up transition mid-capture (e.g. a link flap) - rerun
+                                // the RX-enable kick, same as the initial bring-up does.
+                                driver.onLinkUp(connection, ::logDiag)
+                            }
                         }
                     }
                 }
