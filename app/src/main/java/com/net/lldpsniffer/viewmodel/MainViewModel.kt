@@ -127,6 +127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var sessionFinalizedThisSession = false
     private var linkDownDebounceJob: Job? = null
     private var soloHostCheckJob: Job? = null
+    private var sessionTimeoutJob: Job? = null
 
     private var packetCollectionJob: Job? = null
     private var linkStateCollectionJob: Job? = null
@@ -213,7 +214,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var sessionId = currentSessionId ?: return
         if (packet.lldpFrame == null && packet.cdpFrame == null) return
 
-        var base = _currentRecord.value ?: MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
+        var base = _currentRecord.value
+        var isNewRecord = base == null
+        if (base == null) base = MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
 
         // The link never went down, so nothing else would ever tell us the peer changed - if a
         // finalized session's identity fields conflict with what this frame reports, the switch
@@ -226,6 +229,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             sessionFinalizedThisSession = false
             _currentRecordFinalized.value = false
             base = MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
+            isNewRecord = true
+        }
+
+        if (isNewRecord) {
+            // Some switches only ever advertise one of LLDP/CDP and never populate every core
+            // field either, so neither completion signal below would ever fire - without this,
+            // such a session would sit open until link-down/disconnect. 45s comfortably covers
+            // the slower of the two protocols' typical ~30-60s send interval from this frame.
+            sessionTimeoutJob?.cancel()
+            sessionTimeoutJob = viewModelScope.launch {
+                delay(45_000)
+                finalizeCurrentRecordIfPending()
+            }
         }
 
         val merged = base.mergeWithPacket(packet)
@@ -249,10 +265,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // from the other protocol" signal on its own - finalize (and fire the webhook) right
         // away instead of sitting on the session until link-down/disconnect.
         if (!sessionFinalizedThisSession && (merged.isComplete() || (merged.hasLldp && merged.hasCdp))) {
-            pushToHistory(merged)
-            sessionFinalizedThisSession = true
-            _currentRecordFinalized.value = true
+            finalizeCurrentRecordIfPending()
         }
+    }
+
+    /** Pushes the current record to history/webhook if this session hasn't already finalized. */
+    private fun finalizeCurrentRecordIfPending() {
+        val record = _currentRecord.value ?: return
+        if (sessionFinalizedThisSession) return
+        pushToHistory(record)
+        sessionFinalizedThisSession = true
+        _currentRecordFinalized.value = true
+        sessionTimeoutJob?.cancel()
+        sessionTimeoutJob = null
     }
 
     private fun pushToHistory(record: MergedSwitchportRecord) {
@@ -314,17 +339,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         linkDownDebounceJob = null
         soloHostCheckJob?.cancel()
         soloHostCheckJob = null
+        sessionTimeoutJob?.cancel()
+        sessionTimeoutJob = null
         _currentRecord.value = null
         _currentRecordFinalized.value = false
         _soloHostPeer.value = null
     }
 
     fun endCurrentRecordManually() {
-        val record = _currentRecord.value ?: return
-        if (sessionFinalizedThisSession) return
-        pushToHistory(record)
-        sessionFinalizedThisSession = true
-        _currentRecordFinalized.value = true
+        finalizeCurrentRecordIfPending()
     }
 
     fun renameRecord(id: String, newName: String) {
