@@ -88,34 +88,21 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
     private fun writePlaDword(connection: UsbDeviceConnection, logDiag: (String) -> Unit, reg: Int, value: Long) =
         ocpWrite(connection, logDiag, MCU_TYPE_PLA, reg, 0xFF, 0, value and 0xFFFFFFFFL)
 
-    private fun readPlaByte(connection: UsbDeviceConnection, reg: Int): Int? {
-        val buf = ByteArray(1)
-        val n = connection.controlTransfer(
-            REQUEST_TYPE_VENDOR_IN, VENDOR_REQ_GET_REGS,
-            reg and 0xFFFC.toInt(), MCU_TYPE_PLA or (0x11 shl (reg and 3)),
-            buf, 1, 1000
-        )
-        return if (n > 0) buf[0].toInt() and 0xFF else null
-    }
-
-    private fun readPlaWord(connection: UsbDeviceConnection, reg: Int): Int? {
-        val buf = ByteArray(2)
-        val lane = reg and 2
-        val byteEn = (0x33 shl lane) and 0xFF
-        val n = connection.controlTransfer(
-            REQUEST_TYPE_VENDOR_IN, VENDOR_REQ_GET_REGS,
-            reg and 0xFFFC.toInt(), MCU_TYPE_PLA or byteEn,
-            buf, 2, 1000
-        )
-        if (n <= 0) return null
-        return (buf[0].toInt() and 0xFF) or ((buf[1].toInt() and 0xFF) shl 8)
-    }
-
-    private fun readPlaDword(connection: UsbDeviceConnection, reg: Int): Long? {
+    /**
+     * Reads back a full aligned dword at `reg`'s 4-byte-aligned base address. Matches the
+     * kernel's generic_ocp_read (r8152.c): unlike writes, OCP reads take no byte-enable at
+     * all - wIndex is just the MCU type - and always return the whole dword; the caller
+     * shifts out whichever byte/word lane it actually wants. Earlier revisions of this file
+     * OR'd a byte-enable into wIndex and requested a short (1/2-byte) transfer on reads, the
+     * same shape as writes - that isn't a request real RTL8153 firmware honors, and sending
+     * it wedges the chip's MCU (every subsequent register access then fails and the adapter
+     * drops off the bus), rather than just being ignored or harmless.
+     */
+    private fun readPlaAlignedDword(connection: UsbDeviceConnection, reg: Int): Long? {
         val buf = ByteArray(4)
         val n = connection.controlTransfer(
             REQUEST_TYPE_VENDOR_IN, VENDOR_REQ_GET_REGS,
-            reg and 0xFFFC.toInt(), MCU_TYPE_PLA or 0xFF,
+            reg and 0xFFFC.toInt(), MCU_TYPE_PLA,
             buf, 4, 1000
         )
         if (n <= 0) return null
@@ -124,16 +111,24 @@ class RealtekRtl8153Driver : VendorAdapterDriver {
         return v
     }
 
-    /** Raw PLA_PHYSTATUS (0xE908) byte read, or null if the control transfer failed. */
-    private fun readPlaPhyStatus(connection: UsbDeviceConnection): Int? {
-        val linkBuf = ByteArray(1)
-        val linkRead = connection.controlTransfer(
-            REQUEST_TYPE_VENDOR_IN, VENDOR_REQ_GET_REGS,
-            PLA_PHYSTATUS and 0xFFFC.toInt(), MCU_TYPE_PLA or (0x11 shl (PLA_PHYSTATUS and 3)),
-            linkBuf, 1, 1000
-        )
-        return if (linkRead > 0) linkBuf[0].toInt() and 0xFF else null
+    private fun readPlaByte(connection: UsbDeviceConnection, reg: Int): Int? {
+        val dword = readPlaAlignedDword(connection, reg) ?: return null
+        val lane = reg and 3
+        return ((dword shr (lane * 8)) and 0xFF).toInt()
     }
+
+    private fun readPlaWord(connection: UsbDeviceConnection, reg: Int): Int? {
+        val dword = readPlaAlignedDword(connection, reg) ?: return null
+        val lane = reg and 2
+        return ((dword shr (lane * 8)) and 0xFFFF).toInt()
+    }
+
+    private fun readPlaDword(connection: UsbDeviceConnection, reg: Int): Long? =
+        readPlaAlignedDword(connection, reg)
+
+    /** Raw PLA_PHYSTATUS (0xE908) byte read, or null if the control transfer failed. */
+    private fun readPlaPhyStatus(connection: UsbDeviceConnection): Int? =
+        readPlaByte(connection, PLA_PHYSTATUS)
 
     /** Decodes a PLA_PHYSTATUS byte and logs it. */
     private fun decodeAndLogLinkStatus(linkByte: Int, logDiag: (String) -> Unit): LinkStatus {
