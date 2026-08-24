@@ -3,6 +3,7 @@ package com.net.lldpsniffer.viewmodel
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -178,7 +179,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _service.value = null
     }
 
-    private fun onLinkStateChanged(linkUp: Boolean?) {
+    @VisibleForTesting
+    internal fun onLinkStateChanged(linkUp: Boolean?) {
         if (linkUp == true) {
             linkDownDebounceJob?.cancel()
             linkDownDebounceJob = null
@@ -210,7 +212,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun onPacketForRecord(packet: CapturedPacket) {
+    @VisibleForTesting
+    internal fun onPacketForRecord(packet: CapturedPacket) {
         var sessionId = currentSessionId ?: return
         if (packet.lldpFrame == null && packet.cdpFrame == null) return
 
@@ -233,13 +236,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (isNewRecord) {
-            // Some switches only ever advertise one of LLDP/CDP and never populate every core
-            // field either, so neither completion signal below would ever fire - without this,
-            // such a session would sit open until link-down/disconnect. 45s comfortably covers
-            // the slower of the two protocols' typical ~30-60s send interval from this frame.
+            // Some switches only ever advertise one of LLDP/CDP, so a dual-protocol signal
+            // would never fire - without this timeout, such a session would sit open until
+            // link-down/disconnect. 40s comfortably covers the typical ~30s LLDP interval
+            // while being fast enough for interactive use.
             sessionTimeoutJob?.cancel()
             sessionTimeoutJob = viewModelScope.launch {
-                delay(45_000)
+                delay(40_000)
                 finalizeCurrentRecordIfPending()
             }
         }
@@ -259,12 +262,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "capabilities=${merged.capabilities}, portDescription=${merged.portDescription}"
         )
 
-        // Waiting for every core field to be known (isComplete()) is the general safety net,
-        // but some switches never populate all of them under either protocol. Once both LLDP
-        // and CDP have each contributed a frame, that's a definitive "nothing more is coming
-        // from the other protocol" signal on its own - finalize (and fire the webhook) right
-        // away instead of sitting on the session until link-down/disconnect.
-        if (!sessionFinalizedThisSession && (merged.isComplete() || (merged.hasLldp && merged.hasCdp))) {
+        // Once both LLDP and CDP have each contributed a frame, that's a definitive "nothing
+        // more is coming from the other protocol" signal - finalize (and fire the webhook)
+        // right away instead of waiting for the 40s timeout. For switches that only send one
+        // protocol type, the timeout above handles finalization.
+        if (!sessionFinalizedThisSession && merged.hasLldp && merged.hasCdp) {
             finalizeCurrentRecordIfPending()
         }
     }
