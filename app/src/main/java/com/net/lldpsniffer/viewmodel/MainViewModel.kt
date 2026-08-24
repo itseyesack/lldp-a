@@ -233,19 +233,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var isNewRecord = base == null
         if (base == null) base = MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
 
-        // The link never went down, so nothing else would ever tell us the peer changed - if a
-        // finalized session's identity fields conflict with what this frame reports, the switch
-        // port was moved to a different port/switch without a physical detach. Split off a new
-        // session (fresh id/start time) seeded from this frame rather than folding a different
-        // device's data into the record that was already pushed to history/webhook.
-        if (sessionFinalizedThisSession && base.identityChangedBy(packet)) {
-            sessionId = UUID.randomUUID().toString()
-            currentSessionId = sessionId
-            sessionFinalizedThisSession = false
-            _currentRecordFinalized.value = false
-            base = MergedSwitchportRecord(id = sessionId, startTime = System.currentTimeMillis())
-            isNewRecord = true
-        }
+        // Cable-move detection removed: identityChangedBy() can't handle protocol formatting
+        // differences (LLDP "Gi2/0/12" vs CDP "GigabitEthernet2/0/12") and triggers false
+        // positives during normal dual-protocol merge. If needed later, reimplement with
+        // protocol-specific field tracking.
 
         if (isNewRecord) {
             // Some switches only ever advertise one of LLDP/CDP, so a dual-protocol signal
@@ -268,6 +259,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        _service.value?.usbConnectionManager?.logDiag(
+            "BEFORE merge: base.hasLldp=${base.hasLldp}, base.hasCdp=${base.hasCdp}, " +
+                "packet.lldp=${packet.lldpFrame != null}, packet.cdp=${packet.cdpFrame != null}"
+        )
+
         val merged = base.mergeWithPacket(packet)
         _currentRecord.value = merged
         soloHostCheckJob?.cancel()
@@ -277,18 +273,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // alone - the USB-C port is occupied by the adapter during capture, so live adb
         // inspection of app state isn't an option while a session is running.
         _service.value?.usbConnectionManager?.logDiag(
-            "Merged record: switchName=${merged.switchName}, portId=${merged.portId}, " +
+            "AFTER merge: switchName=${merged.switchName}, portId=${merged.portId}, " +
                 "chassisId=${merged.chassisId}, vlanId=${merged.vlanId}, managementIp=${merged.managementIp}, " +
                 "duplex=${merged.duplex}, platform=${merged.platform}, softwareVersion=${merged.softwareVersion}, " +
-                "capabilities=${merged.capabilities}, portDescription=${merged.portDescription}"
+                "capabilities=${merged.capabilities}, portDescription=${merged.portDescription}, " +
+                "hasLldp=${merged.hasLldp}, hasCdp=${merged.hasCdp}, finalized=$sessionFinalizedThisSession"
         )
 
         // Once both LLDP and CDP have each contributed a frame, that's a definitive "nothing
         // more is coming from the other protocol" signal - finalize (and fire the webhook)
-        // right away instead of waiting for the 40s timeout. For switches that only send one
+        // right away instead of waiting for the timeout. For switches that only send one
         // protocol type, the timeout above handles finalization.
-        if (!sessionFinalizedThisSession && merged.hasLldp && merged.hasCdp) {
-            finalizeCurrentRecordIfPending()
+        //
+        // IMPORTANT: If a smart finalization 3s timeout already fired (finalizing CDP-only),
+        // but then LLDP arrives, we need to re-finalize with the complete merged data.
+        if (merged.hasLldp && merged.hasCdp) {
+            sessionTimeoutJob?.cancel()
+            sessionTimeoutJob = null
+            if (!sessionFinalizedThisSession) {
+                finalizeCurrentRecordIfPending()
+            } else {
+                // Session was already finalized (likely by premature smart timeout), but now
+                // we have both protocols - update history with the complete merged record
+                pushToHistory(merged)
+                updateSwitchProfile(merged)
+            }
         }
     }
 
