@@ -270,4 +270,232 @@ class MainViewModelFinalizationTest {
         assertNotNull(newSessionId)
         assertNotEquals(firstSessionId, newSessionId)
     }
+
+    @Test
+    fun testSmartFinalization_FirstTimeSwitch_UseFullTimeout() = runTest {
+        // Enable smart finalization
+        viewModel.setSmartFinalizationEnabled(true)
+
+        // Start session
+        viewModel.onLinkStateChanged(true)
+
+        // Send LLDP packet from unknown switch
+        val lldpPacket = createLldpPacket()
+        viewModel.onPacketForRecord(lldpPacket)
+
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should NOT finalize after 3 seconds (because switch is unknown)
+        advanceTimeBy(3_500)
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should finalize after full 40s timeout
+        advanceTimeBy(37_000)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+    }
+
+    @Test
+    fun testSmartFinalization_KnownSingleProtocolSwitch_UseFastTimeout() = runTest {
+        // Enable smart finalization
+        viewModel.setSmartFinalizationEnabled(true)
+
+        // First session: learn the switch only sends LLDP
+        viewModel.onLinkStateChanged(true)
+        val lldpPacket1 = createLldpPacket(switchName = "Switch1", chassisId = "AA:BB:CC:DD:EE:FF")
+        viewModel.onPacketForRecord(lldpPacket1)
+
+        advanceTimeBy(41_000)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+        assertEquals(1, viewModel.switchProfiles.value.size)
+
+        // Reset for second session
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+
+        // Second session: same switch, should use 3s timeout
+        viewModel.onLinkStateChanged(true)
+        val lldpPacket2 = createLldpPacket(switchName = "Switch1", chassisId = "AA:BB:CC:DD:EE:FF")
+        viewModel.onPacketForRecord(lldpPacket2)
+
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should finalize after just 3s (smart finalization knows it's LLDP-only)
+        advanceTimeBy(3_500)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+    }
+
+    @Test
+    fun testSmartFinalization_KnownDualProtocolSwitch_UseFullTimeout() = runTest {
+        // Enable smart finalization
+        viewModel.setSmartFinalizationEnabled(true)
+
+        // First session: switch sends both protocols
+        viewModel.onLinkStateChanged(true)
+        val lldpPacket1 = createLldpPacket(switchName = "Switch2", chassisId = "11:22:33:44:55:66")
+        viewModel.onPacketForRecord(lldpPacket1)
+
+        val cdpPacket1 = createCdpPacket(deviceId = "Switch2", platform = "11:22:33:44:55:66")
+        viewModel.onPacketForRecord(cdpPacket1)
+
+        // Should finalize immediately (both protocols received)
+        assertTrue(viewModel.currentRecordFinalized.value)
+        assertEquals(1, viewModel.switchProfiles.value.size)
+        val profile = viewModel.switchProfiles.value.first()
+        assertEquals(2, profile.observedProtocols.size)
+
+        // Reset for second session
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+
+        // Second session: same switch
+        viewModel.onLinkStateChanged(true)
+        val lldpPacket2 = createLldpPacket(switchName = "Switch2", chassisId = "11:22:33:44:55:66")
+        viewModel.onPacketForRecord(lldpPacket2)
+
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should NOT finalize after 3s (because we know it sends both protocols)
+        advanceTimeBy(3_500)
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should wait for full timeout OR second protocol
+        val cdpPacket2 = createCdpPacket(deviceId = "Switch2", platform = "11:22:33:44:55:66")
+        viewModel.onPacketForRecord(cdpPacket2)
+
+        // Should finalize immediately now
+        assertTrue(viewModel.currentRecordFinalized.value)
+    }
+
+    @Test
+    fun testSmartFinalization_VersionChange_TreatAsNewSwitch() = runTest {
+        // Enable smart finalization
+        viewModel.setSmartFinalizationEnabled(true)
+
+        // First session: version 1.0
+        viewModel.onLinkStateChanged(true)
+        val cdpPacket1 = createCdpPacket(
+            deviceId = "Switch3",
+            platform = "AA:AA:AA:AA:AA:AA",
+            managementIp = "10.0.0.3"
+        )
+        viewModel.onPacketForRecord(cdpPacket1)
+
+        advanceTimeBy(41_000)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+
+        // Reset
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+
+        // Second session: version 2.0 (different software version in CDP)
+        viewModel.onLinkStateChanged(true)
+        val cdpPacket2 = createCdpPacket(
+            deviceId = "Switch3",
+            platform = "AA:AA:AA:AA:AA:AA",
+            managementIp = "10.0.0.3"
+        ).copy(cdpFrame = cdpPacket1.cdpFrame!!.copy(softwareVersion = "2.0.0"))
+        viewModel.onPacketForRecord(cdpPacket2)
+
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should use full 40s timeout (version changed, treat as unknown)
+        advanceTimeBy(3_500)
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        advanceTimeBy(37_000)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+    }
+
+    @Test
+    fun testSmartFinalization_Disabled_AlwaysUseFullTimeout() = runTest {
+        // Smart finalization is DISABLED (default state)
+        assertFalse(viewModel.smartFinalizationEnabled.value)
+
+        // First session: establish a profile manually
+        viewModel.setSmartFinalizationEnabled(true)
+        viewModel.onLinkStateChanged(true)
+        val lldpPacket1 = createLldpPacket(switchName = "Switch4", chassisId = "BB:BB:BB:BB:BB:BB")
+        viewModel.onPacketForRecord(lldpPacket1)
+
+        advanceTimeBy(41_000)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+        assertEquals(1, viewModel.switchProfiles.value.size)
+
+        // Reset and DISABLE smart finalization
+        viewModel.setSmartFinalizationEnabled(false)
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+
+        // Second session: even though we have a profile, should use full timeout
+        viewModel.onLinkStateChanged(true)
+        val lldpPacket2 = createLldpPacket(switchName = "Switch4", chassisId = "BB:BB:BB:BB:BB:BB")
+        viewModel.onPacketForRecord(lldpPacket2)
+
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should NOT finalize after 3s (smart finalization is disabled)
+        advanceTimeBy(3_500)
+        assertFalse(viewModel.currentRecordFinalized.value)
+
+        // Should use full 40s timeout
+        advanceTimeBy(37_000)
+        runCurrent()
+
+        assertTrue(viewModel.currentRecordFinalized.value)
+
+        // Profile should NOT be updated (smart finalization disabled)
+        assertEquals(1, viewModel.switchProfiles.value.first().sessionCount)
+    }
+
+    @Test
+    fun testSwitchMemoryLimit_EnforcedOnSave() = runTest {
+        viewModel.setSmartFinalizationEnabled(true)
+        viewModel.setSwitchMemoryLimit(2)
+
+        // Create 3 sessions with different switches, with real time delays
+        // to ensure different lastSeen timestamps
+        for (i in 1..3) {
+            viewModel.onLinkStateChanged(true)
+            val packet = createLldpPacket(
+                switchName = "Switch$i",
+                chassisId = "00:00:00:00:00:0$i"
+            )
+            viewModel.onPacketForRecord(packet)
+
+            advanceTimeBy(41_000)
+            runCurrent()
+
+            viewModel.onLinkStateChanged(false)
+            advanceTimeBy(6_000)
+            runCurrent()
+
+            // Add a small real-time delay to ensure timestamps differ
+            Thread.sleep(10)
+        }
+
+        // Should only have 2 profiles (limit is 2, oldest should be evicted)
+        assertEquals(2, viewModel.switchProfiles.value.size)
+
+        // Most recent should be kept
+        val profileIds = viewModel.switchProfiles.value.map { it.switchId }
+        assertTrue(profileIds.contains("00:00:00:00:00:03"))
+        assertTrue(profileIds.contains("00:00:00:00:00:02"))
+        assertFalse(profileIds.contains("00:00:00:00:00:01"))
+    }
 }

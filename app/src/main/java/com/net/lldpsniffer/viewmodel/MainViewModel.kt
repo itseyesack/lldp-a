@@ -7,6 +7,7 @@ import androidx.annotation.VisibleForTesting
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.net.lldpsniffer.data.ProfileStore
 import com.net.lldpsniffer.data.RecordStore
 import com.net.lldpsniffer.data.SettingsStore
 import com.net.lldpsniffer.model.CapturedPacket
@@ -14,6 +15,7 @@ import com.net.lldpsniffer.model.CopyFieldsConfig
 import com.net.lldpsniffer.model.CopyFormat
 import com.net.lldpsniffer.model.MergedSwitchportRecord
 import com.net.lldpsniffer.model.ProtocolType
+import com.net.lldpsniffer.model.SwitchProtocolProfile
 import com.net.lldpsniffer.model.WebhookConfig
 import com.net.lldpsniffer.model.identityChangedBy
 import com.net.lldpsniffer.model.isComplete
@@ -49,6 +51,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val recordStore = RecordStore(application)
     private val settingsStore = SettingsStore(application)
+    private val profileStore = ProfileStore(application)
 
     init {
         MacVendorLookup.init(application)
@@ -120,6 +123,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _showLogViews = MutableStateFlow(settingsStore.loadShowLogViews())
     val showLogViews: StateFlow<Boolean> = _showLogViews.asStateFlow()
+
+    private val _smartFinalizationEnabled = MutableStateFlow(settingsStore.loadSmartFinalizationEnabled())
+    val smartFinalizationEnabled: StateFlow<Boolean> = _smartFinalizationEnabled.asStateFlow()
+
+    private val _switchMemoryLimit = MutableStateFlow(settingsStore.loadSwitchMemoryLimit())
+    val switchMemoryLimit: StateFlow<Int> = _switchMemoryLimit.asStateFlow()
+
+    private val _switchProfiles = MutableStateFlow<List<SwitchProtocolProfile>>(profileStore.load())
+    val switchProfiles: StateFlow<List<SwitchProtocolProfile>> = _switchProfiles.asStateFlow()
 
     private val _soloHostPeer = MutableStateFlow<PeerDevice?>(null)
     val soloHostPeer: StateFlow<PeerDevice?> = _soloHostPeer.asStateFlow()
@@ -240,9 +252,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // would never fire - without this timeout, such a session would sit open until
             // link-down/disconnect. 40s comfortably covers the typical ~30s LLDP interval
             // while being fast enough for interactive use.
+            //
+            // Smart finalization: if we've seen this switch before and it only sends one
+            // protocol, use a shorter 3s grace period instead of 40s.
+            val timeoutMs = if (_smartFinalizationEnabled.value) {
+                getSmartFinalizationTimeout(packet)
+            } else {
+                40_000L
+            }
+
             sessionTimeoutJob?.cancel()
             sessionTimeoutJob = viewModelScope.launch {
-                delay(40_000)
+                delay(timeoutMs)
                 finalizeCurrentRecordIfPending()
             }
         }
@@ -271,15 +292,100 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Returns the timeout in milliseconds for session finalization. If smart finalization is
+     * enabled and we recognize this switch as single-protocol, returns 3s; otherwise 40s.
+     */
+    private fun getSmartFinalizationTimeout(packet: CapturedPacket): Long {
+        val switchId = packet.lldpFrame?.chassisId ?: packet.cdpFrame?.deviceId ?: return 40_000L
+        val softwareVersion = packet.cdpFrame?.softwareVersion
+            ?: packet.lldpFrame?.systemDescription
+
+        val profile = _switchProfiles.value.firstOrNull { it.switchId == switchId } ?: return 40_000L
+
+        // If version changed, treat as unknown switch
+        if (profile.softwareVersion != null && profile.softwareVersion != softwareVersion) {
+            return 40_000L
+        }
+
+        // If this switch historically sends both protocols, wait full timeout
+        if (profile.observedProtocols.size > 1) {
+            return 40_000L
+        }
+
+        // Known single-protocol switch - use 3s grace period
+        return 3_000L
+    }
+
     /** Pushes the current record to history/webhook if this session hasn't already finalized. */
     private fun finalizeCurrentRecordIfPending() {
         val record = _currentRecord.value ?: return
         if (sessionFinalizedThisSession) return
         pushToHistory(record)
+        updateSwitchProfile(record)
         sessionFinalizedThisSession = true
         _currentRecordFinalized.value = true
         sessionTimeoutJob?.cancel()
         sessionTimeoutJob = null
+    }
+
+    /**
+     * Updates or creates a switch protocol profile based on the finalized session.
+     * Only runs when smart finalization is enabled.
+     */
+    private fun updateSwitchProfile(record: MergedSwitchportRecord) {
+        if (!_smartFinalizationEnabled.value) return
+
+        val switchId = record.chassisId ?: return
+        val softwareVersion = record.softwareVersion ?: record.systemDescription
+        val observedProtocols = mutableSetOf<ProtocolType>()
+        if (record.hasLldp) observedProtocols.add(ProtocolType.LLDP)
+        if (record.hasCdp) observedProtocols.add(ProtocolType.CDP)
+
+        if (observedProtocols.isEmpty()) return
+
+        val profiles = _switchProfiles.value.toMutableList()
+        val existingIndex = profiles.indexOfFirst { it.switchId == switchId }
+
+        val updatedProfile = if (existingIndex >= 0) {
+            val existing = profiles[existingIndex]
+            // If version changed, reset the profile
+            if (existing.softwareVersion != null && existing.softwareVersion != softwareVersion) {
+                SwitchProtocolProfile(
+                    switchId = switchId,
+                    softwareVersion = softwareVersion,
+                    observedProtocols = observedProtocols,
+                    lastSeen = System.currentTimeMillis(),
+                    sessionCount = 1
+                )
+            } else {
+                // Merge protocols seen across sessions
+                existing.copy(
+                    softwareVersion = softwareVersion ?: existing.softwareVersion,
+                    observedProtocols = existing.observedProtocols + observedProtocols,
+                    lastSeen = System.currentTimeMillis(),
+                    sessionCount = existing.sessionCount + 1
+                )
+            }
+        } else {
+            SwitchProtocolProfile(
+                switchId = switchId,
+                softwareVersion = softwareVersion,
+                observedProtocols = observedProtocols,
+                lastSeen = System.currentTimeMillis(),
+                sessionCount = 1
+            )
+        }
+
+        if (existingIndex >= 0) {
+            profiles[existingIndex] = updatedProfile
+        } else {
+            profiles.add(updatedProfile)
+        }
+
+        // Save to disk (enforces memory limit) and reload to sync in-memory state
+        profileStore.save(profiles, _switchMemoryLimit.value)
+        _switchProfiles.value = profileStore.load()
     }
 
     private fun pushToHistory(record: MergedSwitchportRecord) {
@@ -426,6 +532,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setShowLogViews(show: Boolean) {
         _showLogViews.value = show
         settingsStore.saveShowLogViews(show)
+    }
+
+    fun setSmartFinalizationEnabled(enabled: Boolean) {
+        _smartFinalizationEnabled.value = enabled
+        settingsStore.saveSmartFinalizationEnabled(enabled)
+    }
+
+    fun setSwitchMemoryLimit(limit: Int) {
+        _switchMemoryLimit.value = limit
+        settingsStore.saveSwitchMemoryLimit(limit)
+        // Re-save profiles with new limit to enforce it immediately
+        profileStore.save(_switchProfiles.value, limit)
+        _switchProfiles.value = profileStore.load()
+    }
+
+    fun clearSwitchProfiles() {
+        _switchProfiles.value = emptyList()
+        profileStore.clear()
+    }
+
+    fun deleteSwitchProfile(switchId: String) {
+        val updated = _switchProfiles.value.filterNot { it.switchId == switchId }
+        _switchProfiles.value = updated
+        profileStore.save(updated, _switchMemoryLimit.value)
     }
 
     fun setFilter(filter: PacketFilter) {

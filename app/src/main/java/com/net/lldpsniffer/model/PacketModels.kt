@@ -1,5 +1,6 @@
 package com.net.lldpsniffer.model
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -341,6 +342,49 @@ fun MergedSwitchportRecord.Companion.fromJson(json: JSONObject): MergedSwitchpor
     hasLldp = json.optBoolean("hasLldp", false),
     hasCdp = json.optBoolean("hasCdp", false)
 )
+
+/**
+ * Protocol profile for a known switch, used to optimize session finalization. If we've seen
+ * a switch before and it only ever sends one protocol type (LLDP or CDP), we can finalize
+ * sessions faster instead of waiting the full 40-second timeout.
+ */
+data class SwitchProtocolProfile(
+    val switchId: String,                    // chassisId (LLDP) or deviceId (CDP)
+    val softwareVersion: String?,             // Track for staleness detection
+    val observedProtocols: Set<ProtocolType>, // {LLDP}, {CDP}, or {LLDP, CDP}
+    val lastSeen: Long,                       // Timestamp for aging out old entries
+    val sessionCount: Int                     // How many times we've seen this switch
+) {
+    companion object
+}
+
+fun SwitchProtocolProfile.toJson(): JSONObject = JSONObject().apply {
+    put("switchId", switchId)
+    put("softwareVersion", softwareVersion)
+    put("observedProtocols", JSONArray(observedProtocols.map { it.name }))
+    put("lastSeen", lastSeen)
+    put("sessionCount", sessionCount)
+}
+
+fun SwitchProtocolProfile.Companion.fromJson(json: JSONObject): SwitchProtocolProfile {
+    val protocolsArray = json.getJSONArray("observedProtocols")
+    val protocols = mutableSetOf<ProtocolType>()
+    for (i in 0 until protocolsArray.length()) {
+        val protocolName = protocolsArray.getString(i)
+        try {
+            protocols.add(ProtocolType.valueOf(protocolName))
+        } catch (e: IllegalArgumentException) {
+            // Skip unknown protocol types (shouldn't happen, but defensive)
+        }
+    }
+    return SwitchProtocolProfile(
+        switchId = json.getString("switchId"),
+        softwareVersion = json.optString("softwareVersion").takeIf { it.isNotEmpty() },
+        observedProtocols = protocols,
+        lastSeen = json.getLong("lastSeen"),
+        sessionCount = json.getInt("sessionCount")
+    )
+}
 
 data class CapturedPacket(
     val id: String = UUID.randomUUID().toString(),

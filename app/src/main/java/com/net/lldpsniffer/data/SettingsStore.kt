@@ -34,9 +34,12 @@ class SettingsStore(context: Context) {
         private const val KEY_COPY_FORMAT = "copy_format"
         private const val KEY_WEBHOOK_CONFIG = "webhook_config_json"
         private const val KEY_HISTORY_LIMIT = "history_limit"
+        private const val KEY_SMART_FINALIZATION_ENABLED = "smart_finalization_enabled"
+        private const val KEY_SWITCH_MEMORY_LIMIT = "switch_memory_limit"
 
         const val DEFAULT_HISTORY_LIMIT = 100
         const val HISTORY_LIMIT_UNLIMITED = -1
+        const val DEFAULT_SWITCH_MEMORY_LIMIT = 20
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -171,5 +174,21 @@ class SettingsStore(context: Context) {
 
     fun saveHistoryLimit(limit: Int) {
         prefs.edit().putInt(KEY_HISTORY_LIMIT, limit).apply()
+    }
+
+    fun loadSmartFinalizationEnabled(): Boolean =
+        prefs.getBoolean(KEY_SMART_FINALIZATION_ENABLED, false)
+
+    fun saveSmartFinalizationEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SMART_FINALIZATION_ENABLED, enabled).apply()
+    }
+
+    fun loadSwitchMemoryLimit(): Int {
+        val stored = prefs.getInt(KEY_SWITCH_MEMORY_LIMIT, DEFAULT_SWITCH_MEMORY_LIMIT)
+        return if (stored >= 1) stored else DEFAULT_SWITCH_MEMORY_LIMIT
+    }
+
+    fun saveSwitchMemoryLimit(limit: Int) {
+        prefs.edit().putInt(KEY_SWITCH_MEMORY_LIMIT, limit.coerceAtLeast(1)).apply()
     }
 }

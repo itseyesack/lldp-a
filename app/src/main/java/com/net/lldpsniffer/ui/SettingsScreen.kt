@@ -33,11 +33,16 @@ fun SettingsScreen(
     val webhookConfig by viewModel.webhookConfig.collectAsState()
     val showLogViews by viewModel.showLogViews.collectAsState()
     val historyLimit by viewModel.historyLimit.collectAsState()
+    val smartFinalizationEnabled by viewModel.smartFinalizationEnabled.collectAsState()
+    val switchMemoryLimit by viewModel.switchMemoryLimit.collectAsState()
+    val switchProfiles by viewModel.switchProfiles.collectAsState()
 
     var showClearConfirm by remember { mutableStateOf(false) }
     var historyLimitInput by remember {
         mutableStateOf(if (historyLimit == SettingsStore.HISTORY_LIMIT_UNLIMITED) "" else historyLimit.toString())
     }
+    var switchMemoryLimitInput by remember { mutableStateOf(switchMemoryLimit.toString()) }
+    var showSwitchProfilesDialog by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<WebhookSender.Result?>(null) }
     var testInFlight by remember { mutableStateOf(false) }
 
@@ -304,6 +309,71 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider()
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "Smart Finalization",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Learn switch protocol patterns to finalize sessions faster on repeated connections",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Enable smart finalization", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = smartFinalizationEnabled,
+                    onCheckedChange = { viewModel.setSmartFinalizationEnabled(it) }
+                )
+            }
+
+            if (smartFinalizationEnabled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = switchMemoryLimitInput,
+                    onValueChange = { text ->
+                        val digitsOnly = text.filter { it.isDigit() }
+                        switchMemoryLimitInput = digitsOnly
+                        digitsOnly.toIntOrNull()?.let { parsed ->
+                            if (parsed >= 1) viewModel.setSwitchMemoryLimit(parsed)
+                        }
+                    },
+                    label = { Text("Switch memory limit") },
+                    supportingText = { Text("Maximum number of switches to remember (${switchProfiles.size} currently stored)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { showSwitchProfilesDialog = true }) {
+                        Text("View Cached Switches (${switchProfiles.size})")
+                    }
+                    if (switchProfiles.isNotEmpty()) {
+                        TextButton(onClick = { viewModel.clearSwitchProfiles() }) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteForever,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Clear All", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider()
             Spacer(modifier = Modifier.height(8.dp))
 
             if (showClearConfirm) {
@@ -334,5 +404,87 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+
+        if (showSwitchProfilesDialog) {
+            SwitchProfilesDialog(
+                profiles = switchProfiles,
+                onDismiss = { showSwitchProfilesDialog = false },
+                onDelete = { switchId -> viewModel.deleteSwitchProfile(switchId) }
+            )
+        }
     }
+}
+
+@Composable
+private fun SwitchProfilesDialog(
+    profiles: List<com.net.lldpsniffer.model.SwitchProtocolProfile>,
+    onDismiss: () -> Unit,
+    onDelete: (String) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Cached Switches") },
+        text = {
+            if (profiles.isEmpty()) {
+                Text("No switches cached yet. Smart finalization will start learning as you connect to switches.")
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    profiles.forEach { profile ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = profile.switchId,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Protocols: ${profile.observedProtocols.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                if (profile.softwareVersion != null) {
+                                    Text(
+                                        text = "Version: ${profile.softwareVersion}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                                Text(
+                                    text = "Seen ${profile.sessionCount} time${if (profile.sessionCount != 1) "s" else ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                TextButton(
+                                    onClick = { onDelete(profile.switchId) },
+                                    modifier = Modifier.align(Alignment.End)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteForever,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
