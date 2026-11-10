@@ -218,6 +218,17 @@ class UsbConnectionManager(private val context: Context) {
     private var coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val claimedInterfaces = mutableListOf<UsbInterface>()
 
+    // Incremented whenever the current session is superseded (stopCapture, a new
+    // startCapture, or a DETACHED-driven teardown). A runCaptureSetup() whose captured
+    // generation no longer matches is operating on a device that left the bus (or was
+    // replaced) mid-setup - confirmed live on Android 9, where a kernel-side bus reset
+    // re-enumerated the adapter (node 002 -> 003) while the old session was still
+    // grinding through register writes against the dead node.
+    @Volatile
+    private var sessionGeneration = 0L
+
+    private fun isSessionStale(generation: Long): Boolean = generation != sessionGeneration
+
     /**
      * `UsbDevice.interfaceCount`/`getInterface(i)` enumerate interfaces across ALL of the
      * device's USB configurations concatenated together, not just the one currently active -
@@ -236,6 +247,13 @@ class UsbConnectionManager(private val context: Context) {
     }
 
     private fun claimAndTrack(connection: UsbDeviceConnection, iface: UsbInterface, label: String): Boolean {
+        // Step 2 claims every interface of the active configuration up front; later
+        // mode-specific code paths call this again for the same interfaces. Claiming
+        // twice on the same fd is a no-op in usbfs but would duplicate tracking entries.
+        if (claimedInterfaces.any { it.id == iface.id && it.alternateSetting == iface.alternateSetting }) {
+            logDiag("Already claimed $label (id=${iface.id}, alt=${iface.alternateSetting}) - skipping duplicate claim.")
+            return true
+        }
         val claimed = try {
             connection.claimInterface(iface, true)
         } catch (e: Exception) {
@@ -293,16 +311,17 @@ class UsbConnectionManager(private val context: Context) {
                 logDiag("Capture process already active for device ${device.deviceName}. Ignoring duplicate start.")
                 return
             }
+            sessionGeneration++
             activeDevice = device
             captureJob?.cancel()
-            captureJob = coroutineScope.launch { runCaptureSetup(device) }
+            captureJob = coroutineScope.launch { runCaptureSetup(device, generation = sessionGeneration) }
         }
 
         _connectionState.value = UsbConnectionState.Connecting("Opening USB Device...")
         logDiag("Starting capture for device ${device.deviceName} (VID: 0x${String.format("%04X", device.vendorId)}, PID: 0x${String.format("%04X", device.productId)})...")
     }
 
-    private suspend fun runCaptureSetup(device: UsbDevice, reconnectAttempt: Int = 0) {
+    private suspend fun runCaptureSetup(device: UsbDevice, reconnectAttempt: Int = 0, generation: Long = sessionGeneration) {
         var openedConnection: UsbDeviceConnection? = null
         try {
             val connection = usbManager.openDevice(device)
@@ -345,37 +364,22 @@ class UsbConnectionManager(private val context: Context) {
                 if (config.id == 2) cdcConfig = config
             }
 
-            // Step 1: Force-claim (and KEEP claimed) whatever interfaces are presently
-            // active, to detach any kernel driver bound to them. Releasing an interface
-            // that was force-claimed causes the kernel to re-probe and re-bind the
-            // original driver (usb_unbind_and_rebind_marked_interfaces), so unlike the
-            // previous implementation we do not release these until stopCapture().
-            _connectionState.value = UsbConnectionState.Connecting("Detaching kernel driver...")
-            val preSwitchIfaces = interfacesForConfig(device, activeConfigBefore)
-            logDiag("Active configuration exposes ${preSwitchIfaces.size} interface(s) (device.interfaceCount across all configs is ${device.interfaceCount}).")
-            for (iface in preSwitchIfaces) {
-                claimAndTrack(connection, iface, "pre-switch interface ${iface.id}")
-            }
-
+            // Step 1: If the adapter offers CDC-ECM Config 2 but isn't in it, try the
+            // configuration switch FIRST, while nothing is claimed. usbfs rejects
+            // SET_CONFIGURATION with EBUSY both while any interface is claimed and while
+            // a kernel driver is bound, so attempting it before claiming succeeds on
+            // adapters that sit in Config 1 with no driver attached, and fails harmlessly
+            // where r8152/cdc_ether owns the device.
+            //
+            // The previous order (claim to detach the driver, release to make the switch
+            // possible, then setConfiguration) caused an endless loop on older kernels
+            // (confirmed live on stock Android 9 / kernel 3.18 and LineageOS 15): the
+            // force-claim marks the interface needs_binding=1, so releasing it schedules
+            // a kernel rebind of r8152, whose probe calls usb_reset_device() - a bus
+            // reset that re-enumerates the adapter off the bus mid-call, kills the
+            // connection under us, and re-triggers the ATTACHED handler forever.
             var activeConfigValue = activeConfigBefore ?: 1
             if (cdcConfig != null && activeConfigValue != 2) {
-                // usbfs's SET_CONFIGURATION rejects the switch while any interface of the
-                // current configuration is claimed (the claim becomes stale anyway, since
-                // switching configuration destroys and re-enumerates every interface object).
-                // This device shows no kernel network interface before OR after claiming
-                // (logKernelNetworkState consistently reports "none"), meaning there is no
-                // kernel driver here to detach in the first place - so releasing before the
-                // switch is safe on this hardware, unlike the force-claim-and-keep rationale
-                // that applies once we're actually capturing.
-                for (iface in preSwitchIfaces) {
-                    try {
-                        connection.releaseInterface(iface)
-                    } catch (e: Exception) {
-                        logDiag("Release pre-switch interface ${iface.id} threw: ${e.message}")
-                    }
-                }
-                claimedInterfaces.clear()
-
                 _connectionState.value = UsbConnectionState.Connecting("Setting Configuration 2 (CDC-ECM)...")
                 val setResult = connection.setConfiguration(cdcConfig)
                 val activeConfigAfter = getActiveConfigurationValue(connection)
@@ -383,28 +387,42 @@ class UsbConnectionManager(private val context: Context) {
 
                 if (activeConfigAfter == 2) {
                     activeConfigValue = 2
-                    // Interfaces are re-enumerated under the new configuration; our
-                    // earlier claims against the old configuration's interface objects
-                    // are stale, so claim again against the now-active interface set.
-                    claimedInterfaces.clear()
-                    for (iface in interfacesForConfig(device, activeConfigAfter)) {
-                        claimAndTrack(connection, iface, "post-switch interface ${iface.id}")
-                    }
                 } else {
-                    logDiag("Configuration switch to 2 did not take effect. Continuing with actually-active Config $activeConfigValue instead of assuming success.")
-                    // The switch attempt released our vendor-mode claims above; re-claim
-                    // whatever configuration is actually active now that we're falling back.
-                    for (iface in interfacesForConfig(device, activeConfigValue)) {
-                        claimAndTrack(connection, iface, "post-fallback interface ${iface.id}")
-                    }
+                    logDiag("Configuration switch to 2 did not take effect (a kernel driver likely owns the adapter). Continuing with actually-active Config $activeConfigValue instead of assuming success.")
                 }
             } else if (cdcConfig == null) {
                 logDiag("Config 2 (CDC-ECM) not found in configuration list. Operating on Config $activeConfigValue.")
             }
 
-            // Step 2: Find interfaces/endpoints for whichever configuration is confirmed active.
-            _connectionState.value = UsbConnectionState.Connecting("Claiming Interfaces...")
+            // Step 2: Force-claim (and KEEP claimed) every interface of whichever
+            // configuration is actually active now. Claiming with force=true detaches
+            // any bound kernel driver; the claim is never released until teardown, so
+            // the kernel never gets the chance to rebind the driver mid-session (see
+            // the note above on why releasing was fatal on older kernels).
+            _connectionState.value = UsbConnectionState.Connecting("Detaching kernel driver...")
+            val activeIfaces = interfacesForConfig(device, activeConfigValue)
+            logDiag("Active configuration exposes ${activeIfaces.size} interface(s) (device.interfaceCount across all configs is ${device.interfaceCount}).")
+            for (iface in activeIfaces) {
+                claimAndTrack(connection, iface, "interface ${iface.id} (Config $activeConfigValue)")
+            }
 
+            if (isSessionStale(generation)) {
+                // DETACHED/stopCapture (or a newer startCapture) happened while the
+                // steps above were running - the device on the bus is gone or belongs
+                // to a newer session. Closing our fd implicitly releases any claims it
+                // held; do not touch shared session state the newer owner may use.
+                logDiag("Setup aborted: session superseded (detach or restart) while claiming interfaces.")
+                try {
+                    connection.close()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error closing superseded connection", e)
+                }
+                return
+            }
+
+            // Step 3: Identify interfaces/endpoints for whichever configuration is
+            // confirmed active (interfaces are already claimed from Step 2; the
+            // claimAndTrack() calls below are idempotent).
             var controlIface: UsbInterface? = null
             var dataIface: UsbInterface? = null
             var bulkInEndpoint: UsbEndpoint? = null
@@ -433,7 +451,7 @@ class UsbConnectionManager(private val context: Context) {
                     }
                 }
 
-                // Step 3: Hardware Initialization - Send CDC Packet Filter Control Transfer
+                // Step 4: Hardware Initialization - Send CDC Packet Filter Control Transfer
                 _connectionState.value = UsbConnectionState.Connecting("Sending SET_ETHERNET_PACKET_FILTER (0x1F)...")
                 val controlInterfaceId = controlIface?.id ?: 0
                 val filterResult = connection.controlTransfer(
@@ -541,7 +559,8 @@ class UsbConnectionManager(private val context: Context) {
                     device,
                     reconnectAttempt,
                     "Connection to the adapter appears dead (no data or register access for a sustained " +
-                        "period, with no USB detach event)"
+                        "period, with no USB detach event)",
+                    generation
                 )
             }
 
@@ -554,13 +573,14 @@ class UsbConnectionManager(private val context: Context) {
             scheduleReconnectOrGiveUp(
                 device,
                 reconnectAttempt,
-                "Error during USB capture setup: ${e.localizedMessage}"
+                "Error during USB capture setup: ${e.localizedMessage}",
+                generation
             )
         }
     }
 
-    private suspend fun scheduleReconnectOrGiveUp(device: UsbDevice, reconnectAttempt: Int, reason: String) {
-        if (activeDevice != device) {
+    private suspend fun scheduleReconnectOrGiveUp(device: UsbDevice, reconnectAttempt: Int, reason: String, generation: Long = sessionGeneration) {
+        if (activeDevice != device || isSessionStale(generation)) {
             // Superseded by a manual stopCapture() or a different device taking over while this
             // attempt was in flight - respect whatever state that already produced instead of
             // clobbering it with a stale Error/Connecting update for a device we no longer own.
@@ -571,7 +591,7 @@ class UsbConnectionManager(private val context: Context) {
             logDiag("$reason - reopening the device automatically (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS).")
             _connectionState.value = UsbConnectionState.Connecting("Reconnecting to adapter (attempt $nextAttempt/$MAX_RECONNECT_ATTEMPTS)...")
             delay(RECONNECT_DELAY_MS)
-            if (activeDevice == device) {
+            if (activeDevice == device && !isSessionStale(generation)) {
                 // The device can genuinely re-enumerate as a new UsbDevice object between
                 // attempts - observed on hardware as USBDEVFS_RESET itself failing with ENODEV
                 // even though the cable stayed plugged in, meaning the kernel had already torn
@@ -579,8 +599,29 @@ class UsbConnectionManager(private val context: Context) {
                 // openDevice() call return null forever, since Android no longer recognizes that
                 // specific instance as attached even once a fresh one is back on the bus.
                 val freshDevice = findSupportedDevice() ?: device
+                if (freshDevice.deviceName != device.deviceName) {
+                    // Circuit breaker: the adapter re-enumerated at the USB layer (node name
+                    // changed, e.g. /dev/bus/usb/002/002 -> .../003) while the cable stayed
+                    // in. That is the signature of a kernel-side bus reset underneath us -
+                    // historically r8152's probe-time usb_reset_device() after we released a
+                    // force-claimed interface. Reopening a re-enumerated node just repeats the
+                    // reset, so stop here with an explicit diagnosis instead of burning the
+                    // remaining quiet attempts.
+                    logDiag(
+                        "ERROR: Adapter re-enumerated from ${device.deviceName} to ${freshDevice.deviceName} " +
+                            "without a physical unplug - a kernel-side bus reset occurred underneath the app. " +
+                            "Stopping automatic recovery; replug the adapter to retry."
+                    )
+                    clearConnectionResources()
+                    _connectionState.value = UsbConnectionState.Error(
+                        message = "The adapter was reset by the operating system while the app was using it " +
+                            "(it re-appeared as a new USB device). Please unplug and replug the adapter.",
+                        isKernelContention = true
+                    )
+                    return
+                }
                 activeDevice = freshDevice
-                runCaptureSetup(freshDevice, nextAttempt)
+                runCaptureSetup(freshDevice, nextAttempt, generation)
             }
         } else {
             logDiag("ERROR: Automatic recovery exhausted after $reconnectAttempt attempt(s) - giving up until the adapter is unplugged and replugged. $reason")
@@ -732,6 +773,11 @@ class UsbConnectionManager(private val context: Context) {
      */
     private fun teardownForReconnect(connection: UsbDeviceConnection) {
         logDiag("Closing connection before reopen.")
+        // Releasing interfaces / closing the fd lets the kernel rebind its own driver
+        // (r8152 on many devices); its probe may issue one bus reset. Unavoidable - any
+        // release path has this effect - but safe now that setup never releases
+        // mid-session (see runCaptureSetup()) and scheduleReconnectOrGiveUp() trips a
+        // circuit breaker if the adapter re-enumerates instead of looping forever.
         synchronized(this) {
             for (iface in claimedInterfaces) {
                 try {
@@ -769,6 +815,10 @@ class UsbConnectionManager(private val context: Context) {
     // recovery gives up) since that differs by caller.
     private fun clearConnectionResources() {
         synchronized(this) {
+            // Supersede any in-flight runCaptureSetup() for the old session before
+            // tearing its state down, so a late failure in that setup can't schedule
+            // a reconnect against resources this (or a newer) session now owns.
+            sessionGeneration++
             captureJob?.cancel()
             captureJob = null
 
