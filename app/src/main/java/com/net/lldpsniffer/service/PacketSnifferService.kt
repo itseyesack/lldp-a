@@ -98,9 +98,6 @@ class PacketSnifferService : Service() {
 
         when (action) {
             ACTION_START_CAPTURE -> {
-                acquireWakeLock()
-                startForegroundNotification("Initializing USB packet capture...")
-
                 if (usbConnectionManager.connectionState.value is UsbConnectionState.Connected) {
                     Log.i(TAG, "Service already connected and capturing. Skipping intent start.")
                     return START_STICKY
@@ -114,6 +111,8 @@ class PacketSnifferService : Service() {
                 } ?: usbConnectionManager.findSupportedDevice()
 
                 if (device != null) {
+                    acquireWakeLock()
+                    startForegroundNotification("Initializing USB packet capture...")
                     if (usbConnectionManager.hasPermission(device)) {
                         usbConnectionManager.startCapture(device)
                         updateNotification("Sniffing LLDP/CDP frames on ${device.deviceName}...")
@@ -122,8 +121,16 @@ class PacketSnifferService : Service() {
                         updateNotification("Awaiting USB permission...")
                     }
                 } else {
+                    // No adapter present. Don't park a "no adapter" foreground
+                    // notification - drop the started state instead. The Activity
+                    // keeps the service alive (and state updates flowing) via its
+                    // bound connection, and a real capture start re-enters here
+                    // with a device.
                     usbConnectionManager.updateState(UsbConnectionState.Disconnected)
-                    updateNotification("No compatible USB Ethernet adapter detected.")
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    releaseWakeLock()
+                    stopSelf()
+                    return START_NOT_STICKY
                 }
             }
             ACTION_STOP_CAPTURE -> {
@@ -133,12 +140,6 @@ class PacketSnifferService : Service() {
         }
 
         return START_STICKY
-    }
-
-    fun startCaptureForDevice(device: UsbDevice) {
-        acquireWakeLock()
-        startForegroundNotification("Sniffing packets on ${device.deviceName}...")
-        usbConnectionManager.startCapture(device)
     }
 
     fun stopCapture() {

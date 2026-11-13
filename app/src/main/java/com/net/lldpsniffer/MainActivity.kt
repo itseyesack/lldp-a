@@ -130,8 +130,11 @@ class MainActivity : ComponentActivity() {
             registerReceiver(usbReceiver, filter)
         }
 
-        // Start & Bind Foreground Service
-        PacketSnifferService.startService(this)
+        // Bind the service only - do not start it in the foreground here. The service
+        // is created (bound) so state/UI wiring works, but the ongoing foreground
+        // notification only appears once an actual capture begins (see
+        // checkAndStartDeviceCapture / startSnifferService). Opening the app with no
+        // adapter attached no longer parks a "No adapter detected" notification.
         val serviceIntent = Intent(this, PacketSnifferService::class.java)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
@@ -195,7 +198,9 @@ class MainActivity : ComponentActivity() {
 
         if (usbManager.hasPermission(device)) {
             Log.i(TAG, "Already have permission for device: ${device.deviceName}. Starting capture...")
-            srv.startCaptureForDevice(device)
+            // Start (not just bind) so the service is a started foreground service
+            // and survives the Activity unbinding while capture continues.
+            PacketSnifferService.startService(this, device)
         } else {
             Log.i(TAG, "Device found: ${device.deviceName}. Requesting USB permission...")
             srv.usbConnectionManager.updateState(
