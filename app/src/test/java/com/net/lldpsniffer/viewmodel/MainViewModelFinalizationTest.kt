@@ -464,6 +464,112 @@ class MainViewModelFinalizationTest {
     }
 
     @Test
+    fun testWebhook_SentOnceWhenBothProtocolsSeen_NoSpamFromRepeatPackets() = runTest {
+        val sent = mutableListOf<com.net.lldpsniffer.model.MergedSwitchportRecord>()
+        viewModel.testWebhookSink = { sent.add(it) }
+
+        viewModel.onLinkStateChanged(true)
+        viewModel.onPacketForRecord(createLldpPacket())
+        // Single protocol so far - no webhook yet
+        assertEquals(0, sent.size)
+
+        viewModel.onPacketForRecord(createCdpPacket())
+        // Both protocols - exactly one webhook
+        assertEquals(1, sent.size)
+
+        // The reported bug: repeat packets after finalization (with port-id format flips
+        // between CDP "Te1/0/40" and LLDP "TenGigabitEthernet1/0/40") must not re-post.
+        repeat(5) {
+            viewModel.onPacketForRecord(createLldpPacket(portId = "TenGigabitEthernet1/0/40"))
+            viewModel.onPacketForRecord(createCdpPacket(portId = "Te1/0/40"))
+        }
+        assertEquals(1, sent.size)
+
+        // Session end must not add another one either
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+        assertEquals(1, sent.size)
+    }
+
+    @Test
+    fun testWebhook_SingleProtocolSentAtSessionEnd() = runTest {
+        val sent = mutableListOf<com.net.lldpsniffer.model.MergedSwitchportRecord>()
+        viewModel.testWebhookSink = { sent.add(it) }
+
+        viewModel.onLinkStateChanged(true)
+        viewModel.onPacketForRecord(createLldpPacket())
+
+        // Not yet (before deadline)
+        advanceTimeBy(30_000)
+        runCurrent()
+        assertEquals(0, sent.size)
+
+        // Link down ends the session - webhook fires even though only one protocol was seen
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+        assertEquals(1, sent.size)
+    }
+
+    @Test
+    fun testWebhook_DeadlineSendWhenLeftPluggedIn() = runTest {
+        val sent = mutableListOf<com.net.lldpsniffer.model.MergedSwitchportRecord>()
+        viewModel.testWebhookSink = { sent.add(it) }
+
+        viewModel.onLinkStateChanged(true)
+        viewModel.onPacketForRecord(createLldpPacket())
+
+        // Single-protocol switch stays plugged in past the 60s deadline
+        advanceTimeBy(61_000)
+        runCurrent()
+        assertEquals(1, sent.size)
+
+        // Later session end doesn't duplicate it
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+        assertEquals(1, sent.size)
+    }
+
+    @Test
+    fun testWebhook_ResendsOnVlanChangeOnly() = runTest {
+        val sent = mutableListOf<com.net.lldpsniffer.model.MergedSwitchportRecord>()
+        viewModel.testWebhookSink = { sent.add(it) }
+
+        viewModel.onLinkStateChanged(true)
+        viewModel.onPacketForRecord(createLldpPacket(vlanId = 100))
+        viewModel.onPacketForRecord(createCdpPacket(vlanId = 100))
+        assertEquals(1, sent.size)
+
+        // Same VLAN - repeat packets never re-post
+        viewModel.onPacketForRecord(createLldpPacket(vlanId = 100))
+        assertEquals(1, sent.size)
+
+        // VLAN reassignment mid-session - one resend
+        viewModel.onPacketForRecord(createLldpPacket(vlanId = 1813))
+        assertEquals(2, sent.size)
+        assertEquals(1813, sent[1].vlanId)
+
+        // Stable again
+        viewModel.onPacketForRecord(createLldpPacket(vlanId = 1813))
+        assertEquals(2, sent.size)
+    }
+
+    @Test
+    fun testWebhook_NotSentForPacketlessSession() = runTest {
+        val sent = mutableListOf<com.net.lldpsniffer.model.MergedSwitchportRecord>()
+        viewModel.testWebhookSink = { sent.add(it) }
+
+        viewModel.onLinkStateChanged(true)
+        // Link flaps without any LLDP/CDP frame
+        viewModel.onLinkStateChanged(false)
+        advanceTimeBy(6_000)
+        runCurrent()
+        assertEquals(0, sent.size)
+    }
+
+    @Test
     fun testSwitchMemoryLimit_EnforcedOnSave() = runTest {
         viewModel.setSmartFinalizationEnabled(true)
         viewModel.setSwitchMemoryLimit(2)

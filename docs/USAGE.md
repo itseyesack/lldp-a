@@ -74,8 +74,20 @@ Choose the format used whenever a record is copied to the clipboard:
 
 ### Webhook
 
-Send every completed session to a webhook URL, with an optional device name (useful when
-multiple phones share one webhook/channel) and optional auth header. See
+Post each capture session to a webhook URL, with an optional device name (useful when
+multiple phones share one webhook/channel) and optional auth header. To avoid duplicate
+posts for the same session, each session produces **one base webhook**, sent as soon as the
+earliest of these happens:
+
+- both LLDP and CDP frames have been seen (definitive record),
+- 60 seconds have passed since the link came up (covers single-protocol switches left
+  plugged in), or
+- the session ends (link down or adapter detached).
+
+After that, the session is only re-posted if the **VLAN ID changes** mid-session (a port
+reassignment). Cosmetic differences between LLDP and CDP — e.g. `Te1/0/40` vs
+`TenGigabitEthernet1/0/40` — never trigger a resend. Sessions with zero captured packets
+are never posted. See
 [WEBHOOK_TEMPLATES.md](WEBHOOK_TEMPLATES.md) for the full template system, placeholder reference,
 and Discord/generic-endpoint examples. Use **Send test webhook** to verify your configuration
 without waiting for a real capture session.

@@ -27,6 +27,7 @@ import com.net.lldpsniffer.usb.PeerDevice
 import com.net.lldpsniffer.usb.UsbConnectionState
 import com.net.lldpsniffer.usb.driver.LinkStatus
 import com.net.lldpsniffer.vendor.MacVendorLookup
+import com.net.lldpsniffer.webhook.WebhookSendPolicy
 import com.net.lldpsniffer.webhook.WebhookSender
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -141,6 +142,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var linkDownDebounceJob: Job? = null
     private var soloHostCheckJob: Job? = null
     private var sessionTimeoutJob: Job? = null
+    private var webhookPolicy: WebhookSendPolicy? = null
+    private var webhookDeadlineJob: Job? = null
+
+    /** Test seam: when set, captures webhook sends instead of performing HTTP. */
+    @VisibleForTesting
+    internal var testWebhookSink: ((MergedSwitchportRecord) -> Unit)? = null
 
     private var packetCollectionJob: Job? = null
     private var linkStateCollectionJob: Job? = null
@@ -199,6 +206,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (currentSessionId == null) {
                 currentSessionId = UUID.randomUUID().toString()
                 sessionFinalizedThisSession = false
+                webhookPolicy = WebhookSendPolicy()
+                // Deadline: if neither protocol pair completes the record within 60s of the
+                // session starting (single-protocol switch left plugged in), post what we have
+                // so the webhook doesn't wait indefinitely for a link-down that may not come.
+                webhookDeadlineJob?.cancel()
+                webhookDeadlineJob = viewModelScope.launch {
+                    delay(60_000)
+                    maybeSendSessionWebhook(allowBaseSend = true)
+                }
                 _currentRecord.value = null
                 _currentRecordFinalized.value = false
                 _soloHostPeer.value = null
@@ -294,11 +310,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 finalizeCurrentRecordIfPending()
             } else {
                 // Session was already finalized (likely by premature smart timeout), but now
-                // we have both protocols - update history with the complete merged record
+                // we have both protocols - update history with the complete merged record.
+                // Only re-push when the record actually gained something (a protocol it didn't
+                // have at finalize time or a VLAN change); repeat packets must not spam
+                // history saves.
                 pushToHistory(merged)
                 updateSwitchProfile(merged)
             }
         }
+
+        // Webhook: the policy sends the base webhook once both protocols are in (and via the
+        // 60s deadline / session-end paths elsewhere), and resends only on a VLAN change.
+        // Calling it on every packet is safe — repeat packets are no-ops by design.
+        maybeSendSessionWebhook(allowBaseSend = merged.hasLldp && merged.hasCdp)
     }
 
     /**
@@ -404,7 +428,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             applyHistoryLimit(listOf(finalized) + withoutDuplicate, _historyLimit.value)
         }
         recordStore.save(_history.value)
-        sendSessionWebhook(finalized)
     }
 
     private fun applyHistoryLimit(records: List<MergedSwitchportRecord>, limit: Int): List<MergedSwitchportRecord> =
@@ -417,7 +440,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         recordStore.save(_history.value)
     }
 
+    /**
+     * Single entry point for session webhooks. Asks the per-session policy whether this
+     * record warrants a post (base send once both protocols are seen, VLAN-change resend)
+     * and sends it if so. The 60s deadline and session-end paths call this too - the policy
+     * decides, so callers never need to track "already sent" state themselves.
+     */
+    private fun maybeSendSessionWebhook(allowBaseSend: Boolean) {
+        val record = _currentRecord.value ?: return
+        if (record.packetCount == 0) return
+        val policy = webhookPolicy ?: return
+        val finalized = record.copy(endTime = record.endTime ?: System.currentTimeMillis())
+        if (!policy.shouldSend(finalized, allowBaseSend)) return
+        if (allowBaseSend) {
+            webhookDeadlineJob?.cancel()
+            webhookDeadlineJob = null
+        }
+        sendSessionWebhook(finalized)
+    }
+
     private fun sendSessionWebhook(record: MergedSwitchportRecord) {
+        testWebhookSink?.let { sink ->
+            sink(record)
+            return
+        }
         val config = _webhookConfig.value
         if (!config.enabled || config.url.isBlank()) return
         viewModelScope.launch {
@@ -451,6 +497,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (record != null && !sessionFinalizedThisSession && record.packetCount > 0) {
             pushToHistory(record)
         }
+        // Session end is the last-chance webhook trigger: if neither the both-protocols
+        // fast path nor the 60s deadline posted yet, the policy sends now.
+        maybeSendSessionWebhook(allowBaseSend = true)
         currentSessionId = null
         sessionFinalizedThisSession = false
         linkDownDebounceJob = null
@@ -458,6 +507,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         soloHostCheckJob = null
         sessionTimeoutJob?.cancel()
         sessionTimeoutJob = null
+        webhookPolicy = null
+        webhookDeadlineJob?.cancel()
+        webhookDeadlineJob = null
         _currentRecord.value = null
         _currentRecordFinalized.value = false
         _soloHostPeer.value = null
