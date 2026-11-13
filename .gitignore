@@ -23,3 +23,6 @@ keystore_base64.txt
 # Ad-hoc diagnostic capture logs
 *.log
 l2_hardware_logs*.txt
+
+# Local QEMU/Cisco IOSvL2 capture lab (not part of the app)
+tmp/

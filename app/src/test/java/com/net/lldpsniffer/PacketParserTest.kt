@@ -113,9 +113,9 @@ class PacketParserTest {
         bos.write(portLen and 0xFF)
         bos.write(portBytes)
 
-        // TLV 0x000E: Native VLAN = 20
-        bos.write(byteArrayOf(0x00.toByte(), 0x0E.toByte()))
-        bos.write(byteArrayOf(0x00.toByte(), 0x06.toByte())) // Length 6
+        // TLV 0x000A: Native VLAN = 20 (real CDP type for per-port/native VLAN)
+        bos.write(byteArrayOf(0x00.toByte(), 0x0A.toByte()))
+        bos.write(byteArrayOf(0x00.toByte(), 0x06.toByte())) // Length 6 (includes 4-byte TLV header)
         bos.write(byteArrayOf(0x00.toByte(), 0x14.toByte())) // VLAN 20
 
         // TLV 0x000B: Duplex = Full (1)
@@ -180,5 +180,90 @@ class PacketParserTest {
     fun testInvalidOrShortFramesHandledGracefully() {
         assertNull(PacketParser.parseFrame(byteArrayOf(1, 2, 3), 3))
         assertNull(PacketParser.parseFrame(ByteArray(14), 14)) // Non-LLDP/CDP
+    }
+
+    // ---- Fixtures captured from a real Cisco IOSvL2 switch under QEMU (IOS 15.2 vios_l2).
+    // Lab: hostname LLDPSW1, Gi0/0 trunk (native 1813), Gi0/1 access 1813, Gi0/2 access 100,
+    // Vlan1813 mgmt IP 172.18.7.101. See tmp/iol-lab (decode.py + captures) for regeneration.
+
+    private fun loadFixture(name: String): ByteArray {
+        val hex = javaClass.getResourceAsStream("/fixtures/$name.hex")!!
+            .bufferedReader().readText().trim()
+        check(hex.length % 2 == 0)
+        return ByteArray(hex.length / 2) { i ->
+            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    @Test
+    fun testRealIosvl2CdpAccessPortVlan1813() {
+        val bytes = loadFixture("cdp_iosvl2_access_vlan1813")
+        val packet = PacketParser.parseFrame(bytes, bytes.size)
+
+        assertNotNull(packet)
+        assertEquals(ProtocolType.CDP, packet!!.protocol)
+        val cdp = packet.cdpFrame!!
+        assertEquals(2, cdp.version)
+        assertEquals(180, cdp.ttl)
+        assertEquals("LLDPSW1", cdp.deviceId)
+        assertEquals("GigabitEthernet0/1", cdp.portId)
+        assertEquals(1813, cdp.nativeVlan)
+        assertEquals("Full", cdp.duplex)
+        assertEquals(listOf("172.18.7.101"), cdp.addresses)
+        assertTrue(cdp.softwareVersion!!.contains("vios_l2"))
+
+        val record = MergedSwitchportRecord(id = "test", startTime = 0L).mergeWithPacket(packet)
+        assertEquals("LLDPSW1", record.switchName)
+        assertEquals("GigabitEthernet0/1", record.portId)
+        assertEquals(1813, record.vlanId)
+        assertEquals("172.18.7.101", record.managementIp)
+    }
+
+    @Test
+    fun testRealIosvl2CdpAccessPortVlan100() {
+        val bytes = loadFixture("cdp_iosvl2_access_vlan100")
+        val packet = PacketParser.parseFrame(bytes, bytes.size)
+
+        assertNotNull(packet)
+        val cdp = packet!!.cdpFrame!!
+        assertEquals("GigabitEthernet0/2", cdp.portId)
+        assertEquals(100, cdp.nativeVlan)
+    }
+
+    @Test
+    fun testRealIosvl2CdpTrunkTlvOverridesOuterTag() {
+        // Trunk port with native VLAN 1813: IOSvL2 emits CDP tagged with VLAN 1 on this
+        // capture, but TLV 10 (NativeVLAN) carries the true port VLAN 1813. The parser must
+        // let TLV 10 override the outer 802.1Q tag.
+        val bytes = loadFixture("cdp_iosvl2_trunk_native1813_tagged1")
+        val packet = PacketParser.parseFrame(bytes, bytes.size)
+
+        assertNotNull(packet)
+        val cdp = packet!!.cdpFrame!!
+        assertEquals("GigabitEthernet0/0", cdp.portId)
+        assertEquals(1813, cdp.nativeVlan)
+    }
+
+    @Test
+    fun testRealIosvl2LldpAccessPort() {
+        val bytes = loadFixture("lldp_iosvl2_access_gi01")
+        val packet = PacketParser.parseFrame(bytes, bytes.size)
+
+        assertNotNull(packet)
+        assertEquals(ProtocolType.LLDP, packet!!.protocol)
+        val lldp = packet.lldpFrame!!
+        assertEquals(4, lldp.chassisIdSubtype)
+        assertEquals("52:54:00:12:34:56", lldp.chassisId)
+        assertEquals(5, lldp.portIdSubtype)
+        assertEquals("Gi0/1", lldp.portId)
+        assertEquals(120, lldp.ttl)
+        assertEquals("LLDPSW1", lldp.systemName)
+        assertEquals("172.18.7.101", lldp.managementAddress)
+        // IOSvL2 access ports advertise no 802.1/LLDP-MED VLAN TLV and the frame is untagged
+        assertNull(lldp.vlanId)
+
+        val record = MergedSwitchportRecord(id = "test", startTime = 0L).mergeWithPacket(packet)
+        assertEquals("LLDPSW1", record.switchName)
+        assertEquals("Gi0/1", record.portId)
     }
 }
